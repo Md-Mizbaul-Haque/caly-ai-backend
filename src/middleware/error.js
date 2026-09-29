@@ -3,9 +3,11 @@ function notFound(req, res) {
 }
 
 function errorHandler(err, req, res, next) { // eslint-disable-line no-unused-vars
+  const hasStatus = Boolean(err.status || err.statusCode);
   const status = err.status || err.statusCode || 500;
   let message = err.message || 'Internal server error';
   if (err.type === 'entity.parse.failed') message = 'Invalid JSON body';
+  if (process.env.NODE_ENV === 'production' && !hasStatus) message = 'Internal server error';
   if (status >= 500) console.error(err);
   const body = { error: message };
   if (status >= 500 && process.env.NODE_ENV !== 'production') body.stack = err.stack;
