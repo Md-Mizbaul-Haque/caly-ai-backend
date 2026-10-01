@@ -1,20 +1,41 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const mealSchema = new mongoose.Schema(
   {
-    name: { type: String, required: [true, 'name is required'], trim: true, maxlength: 120 },
-    kcal: { type: Number, required: [true, 'kcal is required'], min: 0, max: 10000 },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    name: {
+      type: String,
+      required: [true, "name is required"],
+      trim: true,
+      maxlength: 120,
+    },
+    kcal: {
+      type: Number,
+      required: [true, "kcal is required"],
+      min: 0,
+      max: 10000,
+    },
     protein: { type: Number, default: 0, min: 0 },
     carbs: { type: Number, default: 0, min: 0 },
     fat: { type: Number, default: 0, min: 0 },
-    mealType: { type: String, enum: ['Breakfast', 'Lunch', 'Dinner', 'Snack'], default: 'Snack' },
-    emoji: { type: String, default: '🍽️' },
+    mealType: {
+      type: String,
+      enum: ["Breakfast", "Lunch", "Dinner", "Snack"],
+      default: "Snack",
+    },
+    emoji: { type: String, default: "🍽️" },
+    imageUrl: { type: String, maxlength: 2000 },
     loggedAt: { type: Date, default: Date.now, index: true },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
-mealSchema.set('toJSON', {
+mealSchema.set("toJSON", {
   transform: (_doc, ret) => {
     ret.id = ret._id.toString();
     delete ret._id;
@@ -23,4 +44,4 @@ mealSchema.set('toJSON', {
   },
 });
 
-module.exports = mongoose.model('Meal', mealSchema);
+module.exports = mongoose.model("Meal", mealSchema);
