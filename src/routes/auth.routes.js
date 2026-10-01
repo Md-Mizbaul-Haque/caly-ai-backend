@@ -1,0 +1,208 @@
+const express = require('express');
+const mongoose = require('mongoose');
+const { z } = require('zod');
+const User = require('../models/User');
+const { requireAuth } = require('../middleware/auth');
+const { sendMail } = require('../services/mailer');
+const {
+  CODE_TTL_MINUTES,
+  MAX_RESET_ATTEMPTS,
+  signToken,
+  generateCode,
+  hashCode,
+  codesMatch,
+  hashPassword,
+  passwordMatches,
+  codeExpiry,
+} = require('../services/auth');
+
+const router = express.Router();
+
+router.use((req, res, next) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({ error: 'database unavailable' });
+  }
+  next();
+});
+
+const emailSchema = z.string().trim().toLowerCase().email('email is invalid');
+const passwordSchema = z.string().min(8, 'password must be at least 8 characters').max(128);
+
+const registerSchema = z.object({
+  name: z.string().trim().min(1, 'name is required').max(80),
+  email: emailSchema,
+  password: passwordSchema,
+});
+
+const loginSchema = z.object({
+  email: emailSchema,
+  password: z.string().min(1, 'password is required').max(128),
+});
+
+const verifySchema = z.object({
+  email: emailSchema,
+  code: z.string().trim().regex(/^\d{6}$/, 'code must be 6 digits'),
+});
+
+const resetSchema = z.object({
+  email: emailSchema,
+  code: z.string().trim().regex(/^\d{6}$/, 'code must be 6 digits'),
+  newPassword: passwordSchema,
+});
+
+function invalid(res, details) {
+  return res.status(400).json({ error: 'invalid request', details });
+}
+
+async function issueVerifyCode(user) {
+  const code = generateCode();
+  user.verifyCodeHash = hashCode(code);
+  user.verifyCodeExpiresAt = codeExpiry();
+  user.verifyCodeAttempts = 0;
+  await user.save();
+  await sendMail({
+    to: user.email,
+    subject: 'Your Caly AI verification code',
+    text: `Hi ${user.name},\n\nYour Caly AI verification code is ${code}. It expires in ${CODE_TTL_MINUTES} minutes.\n\nIf you didn't create an account, you can ignore this email.`,
+  });
+}
+
+async function issueResetCode(user) {
+  const code = generateCode();
+  user.resetCodeHash = hashCode(code);
+  user.resetCodeExpiresAt = codeExpiry();
+  user.resetCodeAttempts = 0;
+  await user.save();
+  await sendMail({
+    to: user.email,
+    subject: 'Your Caly AI password reset code',
+    text: `Your Caly AI password reset code is ${code}. It expires in ${CODE_TTL_MINUTES} minutes.\n\nIf you didn't request a reset, you can ignore this email.`,
+  });
+}
+
+// POST /api/auth/register
+router.post('/register', async (req, res) => {
+  const parsed = registerSchema.safeParse(req.body);
+  if (!parsed.success) return invalid(res, parsed.error.issues);
+  const { name, email, password } = parsed.data;
+
+  const existing = await User.findOne({ email });
+  if (existing) {
+    if (existing.emailVerified) {
+      return res.status(409).json({ error: 'an account with this email already exists' });
+    }
+    // Unverified account that never finished signup — let them start over.
+    existing.name = name;
+    existing.passwordHash = await hashPassword(password);
+    await issueVerifyCode(existing);
+    return res.status(201).json({ requiresVerification: true });
+  }
+
+  const user = await User.create({ name, email, passwordHash: await hashPassword(password) });
+  await issueVerifyCode(user);
+  res.status(201).json({ requiresVerification: true });
+});
+
+// POST /api/auth/login
+router.post('/login', async (req, res) => {
+  const parsed = loginSchema.safeParse(req.body);
+  if (!parsed.success) return invalid(res, parsed.error.issues);
+  const { email, password } = parsed.data;
+
+  const user = await User.findOne({ email });
+  if (!user || !(await passwordMatches(password, user.passwordHash))) {
+    return res.status(401).json({ error: 'invalid email or password' });
+  }
+  if (!user.emailVerified) {
+    await issueVerifyCode(user);
+    return res.status(403).json({ error: 'email not verified — a new code has been sent', needsVerification: true });
+  }
+  res.json({ token: signToken(user), user });
+});
+
+// POST /api/auth/verify-email
+router.post('/verify-email', async (req, res) => {
+  const parsed = verifySchema.safeParse(req.body);
+  if (!parsed.success) return invalid(res, parsed.error.issues);
+  const { email, code } = parsed.data;
+
+  const user = await User.findOne({ email });
+  if (!user || !user.verifyCodeHash || !user.verifyCodeExpiresAt || user.verifyCodeExpiresAt <= new Date()) {
+    return res.status(400).json({ error: 'verification code is invalid or expired' });
+  }
+  if (user.verifyCodeAttempts >= MAX_RESET_ATTEMPTS) {
+    return res.status(429).json({ error: 'too many attempts — request a new code' });
+  }
+  if (!codesMatch(code, user.verifyCodeHash)) {
+    user.verifyCodeAttempts += 1;
+    await user.save();
+    return res.status(400).json({ error: 'verification code is invalid or expired' });
+  }
+
+  user.emailVerified = true;
+  user.clearVerifyCode();
+  await user.save();
+  res.json({ token: signToken(user), user });
+});
+
+// POST /api/auth/resend-code — never reveals whether the email exists
+router.post('/resend-code', async (req, res) => {
+  const parsed = z.object({ email: emailSchema }).safeParse(req.body);
+  if (!parsed.success) return invalid(res, parsed.error.issues);
+  const user = await User.findOne({ email: parsed.data.email });
+  if (user && !user.emailVerified) await issueVerifyCode(user);
+  res.json({ ok: true });
+});
+
+// POST /api/auth/forgot-password — always 200, never reveals whether the email exists
+router.post('/forgot-password', async (req, res) => {
+  const parsed = z.object({ email: emailSchema }).safeParse(req.body);
+  if (!parsed.success) return invalid(res, parsed.error.issues);
+  const user = await User.findOne({ email: parsed.data.email });
+  if (user) await issueResetCode(user);
+  res.json({ ok: true });
+});
+
+// POST /api/auth/reset-password
+router.post('/reset-password', async (req, res) => {
+  const parsed = resetSchema.safeParse(req.body);
+  if (!parsed.success) return invalid(res, parsed.error.issues);
+  const { email, code, newPassword } = parsed.data;
+
+  const user = await User.findOne({ email });
+  if (!user || !user.resetCodeHash || !user.resetCodeExpiresAt || user.resetCodeExpiresAt <= new Date()) {
+    return res.status(400).json({ error: 'reset code is invalid or expired' });
+  }
+  if (user.resetCodeAttempts >= MAX_RESET_ATTEMPTS) {
+    return res.status(429).json({ error: 'too many attempts — request a new code' });
+  }
+  if (!codesMatch(code, user.resetCodeHash)) {
+    user.resetCodeAttempts += 1;
+    await user.save();
+    return res.status(400).json({ error: 'reset code is invalid or expired' });
+  }
+
+  user.passwordHash = await hashPassword(newPassword);
+  user.emailVerified = true; // they proved mailbox ownership
+  user.clearResetCode();
+  await user.save();
+  res.json({ token: signToken(user), user });
+});
+
+// GET /api/auth/me
+router.get('/me', requireAuth, (req, res) => {
+  res.json({ user: req.user });
+});
+
+// PUT /api/auth/profile
+router.put('/profile', requireAuth, async (req, res) => {
+  const parsed = z
+    .object({ dailyGoalKcal: z.number().int('dailyGoalKcal must be an integer').gte(500).lte(10000) })
+    .safeParse(req.body);
+  if (!parsed.success) return invalid(res, parsed.error.issues);
+  req.user.dailyGoalKcal = parsed.data.dailyGoalKcal;
+  await req.user.save();
+  res.json({ user: req.user });
+});
+
+module.exports = router;

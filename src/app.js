@@ -25,6 +25,17 @@ const apiLimiter = rateLimit({
 });
 app.use('/api', apiLimiter);
 
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: Number(process.env.AUTH_LIMIT) || 20,
+  message: { error: 'Too many attempts, please try again later' },
+});
+app.use('/api/auth', authLimiter, require('./routes/auth.routes'));
+
+app.use('/api/meals', require('./routes/meals.routes'));
+app.use('/api/weights', require('./routes/weights.routes'));
+app.use('/api/scan', require('./routes/scan.routes'));
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', db: dbUp() ? 'up' : 'down', uptime: Math.round(process.uptime()) });
 });
