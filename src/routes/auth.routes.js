@@ -199,7 +199,7 @@ const activitySchema = z.enum(['sedentary', 'light', 'moderate', 'high']);
 const profileSchema = z.object({
   dailyGoalKcal: z.number().int('dailyGoalKcal must be an integer').gte(500).lte(10000).optional(),
   gender: genderSchema.optional(),
-  birthDate: z.coerce.date().refine((d) => d <= new Date(), 'birthDate must not be in the future').optional(),
+  birthDate: z.coerce.date().refine((d) => d <= new Date(Date.now() - 13 * 365.25 * 24 * 3600 * 1000), 'you must be at least 13 years old').optional(),
   heightCm: z.number().gte(100).lte(250).optional(),
   weightKg: z.number().gte(25).lte(350).optional(),
   targetWeightKg: z.number().gte(25).lte(350).optional(),

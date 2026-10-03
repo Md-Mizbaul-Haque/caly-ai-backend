@@ -30,3 +30,21 @@ describe('User onboarding defaults', () => {
     assert.equal(json.onboardingCompleted, false);
   });
 });
+
+describe('profileSchema birthDate', () => {
+  it('rejects under-13 birthdays', () => {
+    assert.equal(profileSchema.safeParse({ birthDate: '2015-06-01' }).success, false);
+  });
+  it('accepts an adult ISO birthday string', () => {
+    assert.equal(profileSchema.safeParse({ birthDate: '2000-01-15' }).success, true);
+  });
+});
+
+describe('User accepts coerced onboarding payload', () => {
+  it('ISO date string validates through the model', () => {
+    const parsed = profileSchema.safeParse({ birthDate: '2000-01-15', weightKg: 70 });
+    assert.equal(parsed.success, true);
+    const u = new User({ name: 'B', email: 'b@c.co', passwordHash: 'x'.repeat(60), ...parsed.data });
+    assert.equal(u.validateSync(), undefined);
+  });
+});
