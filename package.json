@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
-    "test": "node --test src/routes/meals.validation.test.js"
+    "test": "node --test src/routes/*.test.js"
   },
   "keywords": [],
   "author": "",

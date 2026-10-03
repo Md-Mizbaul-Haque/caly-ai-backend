@@ -194,15 +194,27 @@ router.get('/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
 
+const genderSchema = z.enum(['male', 'female', 'nonbinary', 'prefer_not_to_say']);
+const activitySchema = z.enum(['sedentary', 'light', 'moderate', 'high']);
+const profileSchema = z.object({
+  dailyGoalKcal: z.number().int('dailyGoalKcal must be an integer').gte(500).lte(10000).optional(),
+  gender: genderSchema.optional(),
+  birthDate: z.coerce.date().refine((d) => d <= new Date(), 'birthDate must not be in the future').optional(),
+  heightCm: z.number().gte(100).lte(250).optional(),
+  weightKg: z.number().gte(25).lte(350).optional(),
+  targetWeightKg: z.number().gte(25).lte(350).optional(),
+  activityLevel: activitySchema.optional(),
+  onboardingCompleted: z.boolean().optional(),
+});
+
 // PUT /api/auth/profile
 router.put('/profile', requireAuth, async (req, res) => {
-  const parsed = z
-    .object({ dailyGoalKcal: z.number().int('dailyGoalKcal must be an integer').gte(500).lte(10000) })
-    .safeParse(req.body);
+  const parsed = profileSchema.safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
-  req.user.dailyGoalKcal = parsed.data.dailyGoalKcal;
+  Object.assign(req.user, parsed.data);
   await req.user.save();
   res.json({ user: req.user });
 });
 
 module.exports = router;
+module.exports.profileSchema = profileSchema;
