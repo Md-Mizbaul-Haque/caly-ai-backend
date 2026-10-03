@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const { z } = require('zod');
 const User = require('../models/User');
+const PendingRegistration = require('../models/PendingRegistration');
 const { requireAuth } = require('../middleware/auth');
 const { sendMail } = require('../services/mailer');
 const {
@@ -67,6 +68,19 @@ async function issueVerifyCode(user) {
   });
 }
 
+async function issuePendingCode(pending) {
+  const code = generateCode();
+  pending.codeHash = hashCode(code);
+  pending.codeExpiresAt = codeExpiry();
+  pending.codeAttempts = 0;
+  await pending.save();
+  await sendMail({
+    to: pending.email,
+    subject: 'Your Caly AI verification code',
+    text: `Hi ${pending.name},\n\nYour Caly AI verification code is ${code}. It expires in ${CODE_TTL_MINUTES} minutes.\n\nIf you didn't create an account, you can ignore this email.`,
+  });
+}
+
 async function issueResetCode(user) {
   const code = generateCode();
   user.resetCodeHash = hashCode(code);
@@ -80,7 +94,8 @@ async function issueResetCode(user) {
   });
 }
 
-// POST /api/auth/register
+// POST /api/auth/register — creates a PENDING registration, not a user.
+// The User row is created only after verify-email (or skip-verification).
 router.post('/register', async (req, res) => {
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
@@ -91,15 +106,19 @@ router.post('/register', async (req, res) => {
     if (existing.emailVerified) {
       return res.status(409).json({ error: 'an account with this email already exists' });
     }
-    // Unverified account that never finished signup — let them start over.
-    existing.name = name;
-    existing.passwordHash = await hashPassword(password);
-    await issueVerifyCode(existing);
-    return res.status(201).json({ requiresVerification: true });
+    // Stale unverified row from before verify-first — drop it; the pending
+    // below becomes the single source of truth for this email.
+    await User.deleteOne({ _id: existing._id });
   }
 
-  const user = await User.create({ name, email, passwordHash: await hashPassword(password) });
-  await issueVerifyCode(user);
+  const passwordHash = await hashPassword(password);
+  await PendingRegistration.findOneAndUpdate(
+    { email },
+    { name, email, passwordHash },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+  const pending = await PendingRegistration.findOne({ email });
+  await issuePendingCode(pending);
   res.status(201).json({ requiresVerification: true });
 });
 
@@ -120,28 +139,30 @@ router.post('/login', async (req, res) => {
   res.json({ token: signToken(user), user });
 });
 
-// POST /api/auth/verify-email
+// POST /api/auth/verify-email — confirms a pending registration and
+// creates the User row (verified) in the same step.
 router.post('/verify-email', async (req, res) => {
   const parsed = verifySchema.safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
   const { email, code } = parsed.data;
 
-  const user = await User.findOne({ email });
-  if (!user || !user.verifyCodeHash || !user.verifyCodeExpiresAt || user.verifyCodeExpiresAt <= new Date()) {
+  const pending = await PendingRegistration.findOne({ email });
+  if (!pending || !pending.codeHash || !pending.codeExpiresAt || pending.codeExpiresAt <= new Date()) {
     return res.status(400).json({ error: 'verification code is invalid or expired' });
   }
-  if (user.verifyCodeAttempts >= MAX_RESET_ATTEMPTS) {
+  if (pending.codeAttempts >= MAX_RESET_ATTEMPTS) {
     return res.status(429).json({ error: 'too many attempts — request a new code' });
   }
-  if (!codesMatch(code, user.verifyCodeHash)) {
-    user.verifyCodeAttempts += 1;
-    await user.save();
+  if (!codesMatch(code, pending.codeHash)) {
+    pending.codeAttempts += 1;
+    await pending.save();
     return res.status(400).json({ error: 'verification code is invalid or expired' });
   }
 
+  const user = await User.create({ name: pending.name, email: pending.email, passwordHash: pending.passwordHash });
   user.emailVerified = true;
-  user.clearVerifyCode();
   await user.save();
+  await PendingRegistration.deleteOne({ _id: pending._id });
   res.json({ token: signToken(user), user });
 });
 
@@ -149,9 +170,29 @@ router.post('/verify-email', async (req, res) => {
 router.post('/resend-code', async (req, res) => {
   const parsed = z.object({ email: emailSchema }).safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
-  const user = await User.findOne({ email: parsed.data.email });
-  if (user && !user.emailVerified) await issueVerifyCode(user);
+  const pending = await PendingRegistration.findOne({ email: parsed.data.email });
+  if (pending) await issuePendingCode(pending);
   res.json({ ok: true });
+});
+
+const skipSchema = z.object({ email: emailSchema });
+
+// POST /api/auth/skip-verification — creates the User row immediately as
+// unverified (the "Skip for now" path) and returns a token like verify does.
+// The user re-verifies naturally later: next login hits the 403 path, which
+// auto-sends a fresh code.
+router.post('/skip-verification', async (req, res) => {
+  const parsed = skipSchema.safeParse(req.body);
+  if (!parsed.success) return invalid(res, parsed.error.issues);
+  const { email } = parsed.data;
+
+  const pending = await PendingRegistration.findOne({ email });
+  if (!pending) {
+    return res.status(400).json({ error: 'nothing to skip — request a verification code first' });
+  }
+  const user = await User.create({ name: pending.name, email: pending.email, passwordHash: pending.passwordHash });
+  await PendingRegistration.deleteOne({ _id: pending._id });
+  res.status(201).json({ token: signToken(user), user });
 });
 
 // POST /api/auth/forgot-password — always 200, never reveals whether the email exists
@@ -218,3 +259,4 @@ router.put('/profile', requireAuth, async (req, res) => {
 
 module.exports = router;
 module.exports.profileSchema = profileSchema;
+module.exports.skipSchema = skipSchema;
