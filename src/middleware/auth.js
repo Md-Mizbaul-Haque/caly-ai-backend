@@ -7,7 +7,7 @@ function getToken(req) {
   return m ? m[1] : null;
 }
 
-async function requireAuth(req, res, next) {
+async function authorize(req, res, next, allowUnverified) {
   try {
     const token = getToken(req);
     if (!token) return res.status(401).json({ error: 'authentication required' });
@@ -19,12 +19,25 @@ async function requireAuth(req, res, next) {
     }
     const user = await User.findById(payload.sub);
     if (!user) return res.status(401).json({ error: 'account no longer exists' });
-    if (!user.emailVerified) return res.status(403).json({ error: 'email not verified', needsVerification: true });
+    if (!user.emailVerified && !allowUnverified) {
+      return res.status(403).json({ error: 'email not verified', needsVerification: true });
+    }
     req.user = user;
     next();
   } catch (e) {
     next(e);
   }
 }
+
+function requireAuth(req, res, next) {
+  return authorize(req, res, next, false);
+}
+
+// Onboarding surface for accounts created via skip-verification:
+// identity is proven (token) but the mailbox is not. Everything else
+// stays verified-only.
+requireAuth.allowUnverified = function requireAuthLenient(req, res, next) {
+  return authorize(req, res, next, true);
+};
 
 module.exports = { requireAuth };

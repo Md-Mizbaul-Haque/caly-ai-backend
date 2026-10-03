@@ -230,8 +230,8 @@ router.post('/reset-password', async (req, res) => {
   res.json({ token: signToken(user), user });
 });
 
-// GET /api/auth/me
-router.get('/me', requireAuth, (req, res) => {
+// GET /api/auth/me — onboarding needs the profile before verification.
+router.get('/me', requireAuth.allowUnverified, (req, res) => {
   res.json({ user: req.user });
 });
 
@@ -248,8 +248,9 @@ const profileSchema = z.object({
   onboardingCompleted: z.boolean().optional(),
 });
 
-// PUT /api/auth/profile
-router.put('/profile', requireAuth, async (req, res) => {
+// PUT /api/auth/profile — onboarding writes (gender, birthday, goals…)
+// happen before verification for skip-verification accounts.
+router.put('/profile', requireAuth.allowUnverified, async (req, res) => {
   const parsed = profileSchema.safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
   Object.assign(req.user, parsed.data);
