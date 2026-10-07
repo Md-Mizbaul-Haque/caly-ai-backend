@@ -4,7 +4,7 @@ const { AppError } = require('../utils/AppError');
 async function connectDb() {
   const uri = process.env.MONGO_URI;
   if (!uri) throw new Error('MONGO_URI not set — see .env.example');
-  await mongoose.connect(uri);
+  await mongoose.connect(uri, { dbName: process.env.MONGO_DB || 'caly-ai' });
 }
 
 async function disconnectDb() {

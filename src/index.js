@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 5000;
 async function main() {
   try {
     await connectDb();
-    console.log('MongoDB connected');
+    console.log('MongoDB connected db:', require('mongoose').connection.name);
   } catch (e) {
     console.error('MongoDB connect failed:', e.message);
     console.warn('Continuing without DB — /health reports db:down, /api routes return 503');

@@ -22,6 +22,15 @@ function dayBound(s, endOfDay) {
   return d;
 }
 
+// Local-calendar-day window [00:00:00.000, 23:59:59.999] containing `date`.
+function localDayWindow(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  return {
+    start: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0),
+    end: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999),
+  };
+}
+
 const router = express.Router();
 
 router.use((req, res, next) => {
@@ -40,13 +49,29 @@ router.get('/', async (req, res) => {
   res.json({ weights });
 });
 
+// POST / — one entry per calendar day. A second log for the same local day
+// REPLACES the earlier value (like stepping on the scale twice): the trend
+// chart stays free of artificial double-spikes and the client can optimistically
+// re-log today without duplicating points. Returns 200 {updated:true} when an
+// existing entry was replaced, 201 when a new day was created.
 router.post('/', async (req, res) => {
   const parsed = weightBodySchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: 'invalid weight', details: parsed.error.issues });
   }
-  const weight = await Weight.create({ ...parsed.data, userId: req.user.id });
-  res.status(201).json({ weight });
+  const { value, loggedAt } = parsed.data;
+  const { start, end } = localDayWindow(loggedAt ? new Date(loggedAt) : new Date());
+  const existing = await Weight.findOne({
+    userId: req.user.id,
+    loggedAt: { $gte: start, $lte: end },
+  }).sort({ loggedAt: -1 });
+  if (existing) {
+    existing.value = value;
+    await existing.save();
+    return res.json({ weight: existing, updated: true });
+  }
+  const weight = await Weight.create({ value, ...(loggedAt ? { loggedAt } : {}), userId: req.user.id });
+  res.status(201).json({ weight, updated: false });
 });
 
 router.delete('/:id', async (req, res) => {
@@ -77,3 +102,5 @@ router.put('/goal', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.weightBodySchema = weightBodySchema;
+module.exports.goalBodySchema = goalBodySchema;

@@ -3,8 +3,11 @@ const mongoose = require('mongoose');
 const { z } = require('zod');
 const User = require('../models/User');
 const PendingRegistration = require('../models/PendingRegistration');
+const Weight = require('../models/Weight');
+const WeightGoal = require('../models/WeightGoal');
 const { requireAuth } = require('../middleware/auth');
 const { sendMail } = require('../services/mailer');
+const { verificationEmail, passwordResetEmail } = require('../services/emailTemplates');
 const {
   CODE_TTL_MINUTES,
   MAX_RESET_ATTEMPTS,
@@ -63,8 +66,7 @@ async function issueVerifyCode(user) {
   await user.save();
   await sendMail({
     to: user.email,
-    subject: 'Your Caly AI verification code',
-    text: `Hi ${user.name},\n\nYour Caly AI verification code is ${code}. It expires in ${CODE_TTL_MINUTES} minutes.\n\nIf you didn't create an account, you can ignore this email.`,
+    ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
   });
 }
 
@@ -76,8 +78,7 @@ async function issuePendingCode(pending) {
   await pending.save();
   await sendMail({
     to: pending.email,
-    subject: 'Your Caly AI verification code',
-    text: `Hi ${pending.name},\n\nYour Caly AI verification code is ${code}. It expires in ${CODE_TTL_MINUTES} minutes.\n\nIf you didn't create an account, you can ignore this email.`,
+    ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
   });
 }
 
@@ -89,8 +90,7 @@ async function issueResetCode(user) {
   await user.save();
   await sendMail({
     to: user.email,
-    subject: 'Your Caly AI password reset code',
-    text: `Your Caly AI password reset code is ${code}. It expires in ${CODE_TTL_MINUTES} minutes.\n\nIf you didn't request a reset, you can ignore this email.`,
+    ...passwordResetEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
   });
 }
 
@@ -129,7 +129,18 @@ router.post('/login', async (req, res) => {
   const { email, password } = parsed.data;
 
   const user = await User.findOne({ email });
-  if (!user || !(await passwordMatches(password, user.passwordHash))) {
+  if (!user) {
+    // Verify-first flow: the account may exist only as a pending
+    // registration (no User row until verify-email). Same 401 as unknown
+    // email on wrong password — no enumeration.
+    const pending = await PendingRegistration.findOne({ email });
+    if (pending && (await passwordMatches(password, pending.passwordHash))) {
+      await issuePendingCode(pending);
+      return res.status(403).json({ error: 'email not verified — a new code has been sent', needsVerification: true });
+    }
+    return res.status(401).json({ error: 'invalid email or password' });
+  }
+  if (!(await passwordMatches(password, user.passwordHash))) {
     return res.status(401).json({ error: 'invalid email or password' });
   }
   if (!user.emailVerified) {
@@ -248,11 +259,76 @@ const profileSchema = z.object({
   onboardingCompleted: z.boolean().optional(),
 });
 
+// Tracking surface works in lbs (WeightLogSheet + Progress labels) while the
+// profile stores kg. Seeds use this conversion — never store raw kg into the
+// weights collections.
+const KG_TO_LBS = 2.20462;
+function toLbs(kg) {
+  return Math.round(Number(kg) * KG_TO_LBS * 10) / 10;
+}
+
+// Onboarding completion seeds the tracking collections from the profile the
+// user just finished: first weigh-in + goal weight. Never overwrites —
+// existing rows win (e.g. user logged during onboarding, or is retrying
+// completion after a failed response). Idempotent by construction.
+async function seedTrackingFromOnboarding(user, deps = {}) {
+  const WeightModel = deps.Weight || Weight;
+  const WeightGoalModel = deps.WeightGoal || WeightGoal;
+  if (typeof user.weightKg === 'number') {
+    const count = await WeightModel.countDocuments({ userId: user._id });
+    if (count === 0) {
+      await WeightModel.create({ userId: user._id, value: toLbs(user.weightKg) });
+    }
+  }
+  if (typeof user.targetWeightKg === 'number') {
+    const existing = await WeightGoalModel.findOne({ userId: user._id });
+    if (!existing) {
+      await WeightGoalModel.create({ userId: user._id, value: toLbs(user.targetWeightKg) });
+    }
+  }
+}
+
 // PUT /api/auth/profile — onboarding writes (gender, birthday, goals…)
 // happen before verification for skip-verification accounts.
+// SECURITY + SAFETY: onboarding can only complete for req.user (JWT sub —
+// body can never pick another user). When onboardingCompleted=true the
+// server merges body over the stored user, requires ALL plan fields, and
+// recomputes dailyGoalKcal server-side — the client's calorie number is
+// IGNORED so a buggy/tampered client can never inject a dangerous or
+// wrong-user plan. Incomplete completions get 400 + missing[] and nothing
+// is marked complete.
 router.put('/profile', requireAuth.allowUnverified, async (req, res) => {
   const parsed = profileSchema.safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
+  if (parsed.data.onboardingCompleted === true) {
+    const { buildNutritionPlan, missingPlanFields } = require('../services/nutritionPlan');
+    const candidate = {
+      gender: parsed.data.gender !== undefined ? parsed.data.gender : req.user.gender,
+      birthDate: parsed.data.birthDate !== undefined ? parsed.data.birthDate : req.user.birthDate,
+      heightCm: parsed.data.heightCm !== undefined ? parsed.data.heightCm : req.user.heightCm,
+      weightKg: parsed.data.weightKg !== undefined ? parsed.data.weightKg : req.user.weightKg,
+      targetWeightKg: parsed.data.targetWeightKg !== undefined ? parsed.data.targetWeightKg : req.user.targetWeightKg,
+      activityLevel: parsed.data.activityLevel !== undefined ? parsed.data.activityLevel : req.user.activityLevel,
+    };
+    try {
+      const plan = buildNutritionPlan(candidate);
+      Object.assign(req.user, parsed.data, { dailyGoalKcal: plan.dailyGoalKcal, onboardingCompleted: true });
+      await req.user.save();
+      // First weigh-in + goal for the Progress screen, from the profile the
+      // user just completed. Retry-safe (seed skips when rows exist).
+      await seedTrackingFromOnboarding(req.user);
+      return res.json({ user: req.user, plan });
+    } catch (e) {
+      if (e.status === 400) {
+        return res.status(400).json({
+          error: 'cannot complete onboarding — all profile fields are required for a safe plan',
+          missing: e.missing || missingPlanFields(candidate),
+          details: e.details || [],
+        });
+      }
+      throw e;
+    }
+  }
   Object.assign(req.user, parsed.data);
   await req.user.save();
   res.json({ user: req.user });
@@ -261,3 +337,5 @@ router.put('/profile', requireAuth.allowUnverified, async (req, res) => {
 module.exports = router;
 module.exports.profileSchema = profileSchema;
 module.exports.skipSchema = skipSchema;
+module.exports.toLbs = toLbs;
+module.exports.seedTrackingFromOnboarding = seedTrackingFromOnboarding;
