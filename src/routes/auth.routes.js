@@ -6,6 +6,7 @@ const PendingRegistration = require('../models/PendingRegistration');
 const Weight = require('../models/Weight');
 const WeightGoal = require('../models/WeightGoal');
 const { requireAuth } = require('../middleware/auth');
+const { resolveTimezone } = require('../utils/timezone');
 const { sendMail } = require('../services/mailer');
 const { verificationEmail, passwordResetEmail } = require('../services/emailTemplates');
 const {
@@ -257,6 +258,9 @@ const profileSchema = z.object({
   targetWeightKg: z.number().gte(25).lte(350).optional(),
   activityLevel: activitySchema.optional(),
   onboardingCompleted: z.boolean().optional(),
+  // Client's IANA zone (e.g. 'Asia/Dhaka'). Normalized server-side: anything
+  // unusable becomes 'UTC' instead of a 400, so days always have a zone.
+  timezone: z.string().max(100).optional(),
 });
 
 // Tracking surface works in lbs (WeightLogSheet + Progress labels) while the
@@ -300,6 +304,9 @@ async function seedTrackingFromOnboarding(user, deps = {}) {
 router.put('/profile', requireAuth.allowUnverified, async (req, res) => {
   const parsed = profileSchema.safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
+  if (parsed.data.timezone !== undefined) {
+    parsed.data.timezone = resolveTimezone(parsed.data.timezone);
+  }
   if (parsed.data.onboardingCompleted === true) {
     const { buildNutritionPlan, missingPlanFields } = require('../services/nutritionPlan');
     const candidate = {

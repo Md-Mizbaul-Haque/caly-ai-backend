@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const { z } = require('zod');
 const Meal = require('../models/Meal');
 const { requireAuth } = require('../middleware/auth');
+const { dayBounds, requestTimezone } = require('../utils/timezone');
 
 const mealBodySchema = z.object({
   name: z.string().trim().min(1, 'name is required').max(120),
@@ -16,12 +17,10 @@ const mealBodySchema = z.object({
   loggedAt: z.string().datetime({ offset: true }).optional(),
 });
 
-function dayBound(s, endOfDay) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
-  if (!m) return null;
-  const d = new Date(+m[1], +m[2] - 1, +m[3], endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0);
-  if (d.getFullYear() !== +m[1] || d.getMonth() !== +m[2] - 1 || d.getDate() !== +m[3]) return null;
-  return d;
+function dayBound(s, endOfDay, tz) {
+  const b = dayBounds(s, tz);
+  if (!b) return null;
+  return endOfDay ? b.end : b.start;
 }
 
 function dbDown(res) {
@@ -78,8 +77,11 @@ router.get('/my-foods', async (req, res) => {
 });
 
 router.get('/', async (req, res) => {
-  const from = dayBound(req.query.from, false);
-  const to = dayBound(req.query.to, true);
+  // Calendar days are interpreted in the caller's zone: explicit ?tz=,
+  // else this user's stored zone, else UTC.
+  const tz = requestTimezone(req);
+  const from = dayBound(req.query.from, false, tz);
+  const to = dayBound(req.query.to, true, tz);
   if (!from || !to || from > to) {
     return res.status(400).json({ error: 'from and to query params required as YYYY-MM-DD' });
   }

@@ -16,6 +16,9 @@ const userSchema = new mongoose.Schema(
     passwordHash: { type: String, required: true },
     emailVerified: { type: Boolean, default: false },
     dailyGoalKcal: { type: Number, default: 2000, min: 500, max: 10000 },
+    // IANA calendar zone for this user's days (e.g. 'Asia/Dhaka').
+    // Anything unusable resolves to 'UTC' at read time — never trust stored.
+    timezone: { type: String, default: 'UTC', maxlength: 100 },
     gender: { type: String, enum: ['male', 'female', 'nonbinary', 'prefer_not_to_say'], default: null },
     birthDate: { type: Date, default: null },
     heightCm: { type: Number, min: 100, max: 250, default: null },

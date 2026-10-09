@@ -31,6 +31,17 @@ describe('User onboarding defaults', () => {
   });
 });
 
+describe('profileSchema timezone', () => {
+  it('accepts an IANA zone string', () => {
+    const r = profileSchema.safeParse({ timezone: 'Asia/Dhaka' });
+    assert.equal(r.success, true);
+  });
+  it('new users default to UTC', () => {
+    const u = new User({ name: 'C', email: 'c@d.co', passwordHash: 'x'.repeat(60) });
+    assert.equal(u.timezone, 'UTC');
+  });
+});
+
 describe('profileSchema birthDate', () => {
   it('rejects under-13 birthdays', () => {
     assert.equal(profileSchema.safeParse({ birthDate: '2015-06-01' }).success, false);

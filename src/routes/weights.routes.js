@@ -4,6 +4,7 @@ const { z } = require('zod');
 const Weight = require('../models/Weight');
 const WeightGoal = require('../models/WeightGoal');
 const { requireAuth } = require('../middleware/auth');
+const { dayBounds, localDayWindow: zonedDayWindow, requestTimezone } = require('../utils/timezone');
 
 const weightBodySchema = z.object({
   value: z.number().gte(20).lte(1000),
@@ -14,21 +15,17 @@ const goalBodySchema = z.object({
   value: z.number().gte(20).lte(1000),
 });
 
-function dayBound(s, endOfDay) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
-  if (!m) return null;
-  const d = new Date(+m[1], +m[2] - 1, +m[3], endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0);
-  if (d.getFullYear() !== +m[1] || d.getMonth() !== +m[2] - 1 || d.getDate() !== +m[3]) return null;
-  return d;
+function dayBound(s, endOfDay, tz) {
+  const b = dayBounds(s, tz);
+  if (!b) return null;
+  return endOfDay ? b.end : b.start;
 }
 
-// Local-calendar-day window [00:00:00.000, 23:59:59.999] containing `date`.
-function localDayWindow(date) {
+// Local-calendar-day window [00:00:00.000, 23:59:59.999] containing `date`
+// in the user's zone (not the server's).
+function localDayWindow(date, tz) {
   const d = date instanceof Date ? date : new Date(date);
-  return {
-    start: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0),
-    end: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999),
-  };
+  return zonedDayWindow(d, tz);
 }
 
 const router = express.Router();
@@ -42,8 +39,9 @@ router.use((req, res, next) => {
 router.use(requireAuth);
 
 router.get('/', async (req, res) => {
-  const from = dayBound(req.query.from, false);
-  const to = dayBound(req.query.to, true);
+  const tz = requestTimezone(req);
+  const from = dayBound(req.query.from, false, tz);
+  const to = dayBound(req.query.to, true, tz);
   const loggedAt = from && to && from <= to ? { loggedAt: { $gte: from, $lte: to } } : {};
   const weights = await Weight.find({ userId: req.user.id, ...loggedAt }).sort({ loggedAt: 1 });
   res.json({ weights });
@@ -60,7 +58,9 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'invalid weight', details: parsed.error.issues });
   }
   const { value, loggedAt } = parsed.data;
-  const { start, end } = localDayWindow(loggedAt ? new Date(loggedAt) : new Date());
+  // Same-day replace is evaluated in the user's calendar day (?tz=, else
+  // stored zone, else UTC) — not the server's local day.
+  const { start, end } = localDayWindow(loggedAt ? new Date(loggedAt) : new Date(), requestTimezone(req));
   const existing = await Weight.findOne({
     userId: req.user.id,
     loggedAt: { $gte: start, $lte: end },

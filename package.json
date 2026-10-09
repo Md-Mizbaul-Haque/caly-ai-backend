@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
-    "test": "node --test src/routes/*.test.js src/models/*.test.js src/services/*.test.js"
+    "test": "node --test src/routes/*.test.js src/models/*.test.js src/services/*.test.js src/utils/*.test.js"
   },
   "keywords": [],
   "author": "",
