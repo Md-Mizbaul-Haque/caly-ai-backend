@@ -17,6 +17,13 @@ router.use(requireAuth);
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB, mirrors express.json limit
+  fileFilter: (_req, file, cb) => {
+    // Non-images would burn a paid vision call just to 422 — reject early.
+    if (/^image\//.test(file.mimetype || '')) return cb(null, true);
+    const err = new Error('only image files are accepted');
+    err.status = 400;
+    cb(err);
+  },
 });
 
 // Vision provider config: Groq (gsk_... key) or OpenAI (sk-... key).
@@ -48,7 +55,9 @@ function getClient() {
   if (!provider) return null;
   if (!client || clientKey !== provider.apiKey) {
     const OpenAI = require('openai');
-    client = new OpenAI({ apiKey: provider.apiKey, baseURL: provider.baseURL });
+    // 55 s cap: the app waits 60 s, so a hung provider surfaces as a
+    // catchable error instead of an eternal request.
+    client = new OpenAI({ apiKey: provider.apiKey, baseURL: provider.baseURL, timeout: 55000 });
     clientKey = provider.apiKey;
   }
   return client;
@@ -132,13 +141,27 @@ router.post('/', upload.single('image'), async (req, res) => {
     }
     res.json({ items: parsed.data.items });
   } catch (e) {
-    if (e.name === 'ZodError') {
-      return res.status(502).json({ error: 'unexpected model response' });
-    }
     console.error('scan error:', e.message);
     res.status(502).json({ error: 'failed to analyze image' });
   }
 });
+
+// OpenFoodFacts numbers arrive as numbers, strings, or null — coerce to a
+// safe finite value (strings like "12.5" work, garbage becomes 0).
+function toNum(v, digits = 0) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  const f = 10 ** digits;
+  return Math.round(n * f) / f;
+}
+
+// Serving size in grams from OpenFoodFacts ("40g", "40 g", "1 bar (40g)").
+// A bare count ("40", "1 bar") has no unit — null means per-100g.
+function servingGrams(quantity, unit) {
+  const m = `${quantity ?? ''} ${unit ?? ''}`.match(/([\d.]+)\s*g/i);
+  const g = m ? parseFloat(m[1]) : NaN;
+  return Number.isFinite(g) && g > 0 ? g : null;
+}
 
 // GET /api/scan/barcode/:code — look up a packaged food via OpenFoodFacts
 router.get('/barcode/:code', async (req, res) => {
@@ -150,28 +173,38 @@ router.get('/barcode/:code', async (req, res) => {
     // OpenFoodFacts indexes EAN-13 as-is; UPC-A (12-digit) is stored with a leading 0
     const candidates = code.length === 12 ? [code, `0${code}`] : [code];
     let data = null;
+    let upstreamOk = false;
     for (const candidate of candidates) {
       const offRes = await fetch(
         `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(candidate)}.json?fields=product_name,brands,nutriments,serving_quantity,serving_unit`
-      );
-      if (!offRes.ok) {
-        return res.status(502).json({ error: 'barcode lookup failed' });
-      }
-      data = await offRes.json();
-      if (data.status === 1 && data.product) break;
+      ).catch(() => null);
+      if (!offRes || !offRes.ok) continue;
+      upstreamOk = true;
+      data = await offRes.json().catch(() => null);
+      if (data && data.status === 1 && data.product) break;
+    }
+    if (!upstreamOk) {
+      return res.status(502).json({ error: 'barcode lookup failed' });
     }
     if (!data || data.status !== 1 || !data.product) {
       return res.status(404).json({ error: 'product not found' });
     }
     const p = data.product;
     const n = p.nutriments || {};
+    // kcal field is sometimes absent while kilojoules are present.
+    const kcal100 = n['energy-kcal_100g'] ?? toNum(n['energy_100g']) / 4.184;
+    // Scale per-100g values to the serving when OpenFoodFacts states one;
+    // otherwise flag per100g so the app can say so.
+    const grams = servingGrams(p.serving_quantity, p.serving_unit);
+    const scale = grams ? grams / 100 : 1;
     res.json({
       item: {
         name: [p.product_name, p.brands].filter(Boolean).join(' — ').slice(0, 120) || 'Unknown product',
-        kcal: Math.round(n['energy-kcal_100g'] ?? 0),
-        protein: Number((n['proteins_100g'] ?? 0).toFixed(1)),
-        carbs: Number((n['carbohydrates_100g'] ?? 0).toFixed(1)),
-        fat: Number((n['fat_100g'] ?? 0).toFixed(1)),
+        kcal: toNum(kcal100 * scale),
+        protein: toNum(n['proteins_100g'] * scale, 1),
+        carbs: toNum(n['carbohydrates_100g'] * scale, 1),
+        fat: toNum(n['fat_100g'] * scale, 1),
+        ...(grams ? { serving: `${grams}g` } : { per100g: true }),
       },
     });
   } catch (e) {
@@ -181,3 +214,5 @@ router.get('/barcode/:code', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.LABEL_SCHEMA = LABEL_SCHEMA;
+module.exports.scanHelpers = { toNum, servingGrams };
