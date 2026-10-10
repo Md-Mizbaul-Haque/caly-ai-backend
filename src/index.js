@@ -12,7 +12,7 @@ async function main() {
     console.error('MongoDB connect failed:', e.message);
     console.warn('Continuing without DB — /health reports db:down, /api routes return 503');
   }
-  const server = app.listen(PORT, () => console.log(`Caly AI API running on http://localhost:${PORT}`));
+  const server = app.listen(PORT, '0.0.0.0', () => console.log(`Caly AI API running on http://localhost:${PORT}`));
   function shutdown(signal) {
     console.log(`${signal} received — shutting down`);
     server.close(async () => {
