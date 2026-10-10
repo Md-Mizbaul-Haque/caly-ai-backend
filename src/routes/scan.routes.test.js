@@ -21,6 +21,14 @@ describe('LABEL_SCHEMA (AI vision output)', () => {
     assert.equal(LABEL_SCHEMA.safeParse({ items: [{ name: 'x', kcal: -5 }] }).success, false);
     assert.equal(LABEL_SCHEMA.safeParse({ items: [{ name: 'x', kcal: 6000 }] }).success, false);
   });
+
+  it('accepts an optional serving portion per item', () => {
+    const r = LABEL_SCHEMA.safeParse({
+      items: [{ name: 'Pizza', kcal: 300, serving: '1 slice' }],
+    });
+    assert.equal(r.success, true);
+    assert.equal(r.data.items[0].serving, '1 slice');
+  });
 });
 
 describe('scanHelpers (barcode math)', () => {
@@ -36,5 +44,13 @@ describe('scanHelpers (barcode math)', () => {
     assert.equal(scanHelpers.servingGrams('1 bar (40g)'), 40);
     assert.equal(scanHelpers.servingGrams('40'), null);
     assert.equal(scanHelpers.servingGrams(undefined), null);
+  });
+
+  it('isImageBuffer checks magic bytes, not the mime string', () => {
+    assert.equal(scanHelpers.isImageBuffer(Buffer.from([0xff, 0xd8, 0xff, 0x00, 1, 2, 3, 4, 5, 6, 7, 8])), true);
+    assert.equal(scanHelpers.isImageBuffer(Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4, 5, 6, 7, 8])), true);
+    assert.equal(scanHelpers.isImageBuffer(Buffer.from('not an image at all......')), false);
+    assert.equal(scanHelpers.isImageBuffer(Buffer.alloc(4)), false);
+    assert.equal(scanHelpers.isImageBuffer(null), false);
   });
 });

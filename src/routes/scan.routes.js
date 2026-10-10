@@ -67,8 +67,10 @@ const FOOD_SYSTEM_PROMPT =
   'You are a nutrition expert. Analyze the food in the photo. ' +
   'Identify each distinct food item you can see. For each item estimate its ' +
   'serving calories (kcal) and macronutrients in grams. ' +
+  'For each item also describe the pictured portion in a short "serving" ' +
+  'string (e.g. "1 slice", "whole bowl", "1 jar"). ' +
   'Respond ONLY with a JSON object of shape: ' +
-  '{"items":[{"name":"string","kcal":number,"protein":number,"carbs":number,"fat":number}]} ' +
+  '{"items":[{"name":"string","kcal":number,"protein":number,"carbs":number,"fat":number,"serving":"string"}]} ' +
   'with 1-6 items. Use realistic portion estimates. No extra text.';
 
 const LABEL_SCHEMA = z.object({
@@ -80,11 +82,27 @@ const LABEL_SCHEMA = z.object({
         protein: z.number().min(0).max(500).default(0),
         carbs: z.number().min(0).max(500).default(0),
         fat: z.number().min(0).max(500).default(0),
+        // Pictured portion ("1 slice", "whole bowl") — without it a photo
+        // kcal is a bare number the diary would treat as the whole meal.
+        serving: z.string().trim().min(1).max(60).optional(),
       })
     )
     .min(1)
     .max(6),
 });
+
+// Magic numbers, not client mimetypes: a spoofed Content-Type must not reach
+// the paid vision call (or Cloudinary). Covers JPEG/PNG/GIF/WebP.
+function isImageBuffer(buf) {
+  if (!buf || buf.length < 12) return false;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true; // JPEG
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true; // PNG
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return true; // GIF
+  return (
+    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+  ); // RIFF....WEBP
+}
 
 function parseJsonLoose(text) {
   let raw = (text || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
@@ -113,10 +131,11 @@ router.post('/', upload.single('image'), async (req, res) => {
   const aiClient = getClient();
   const model = resolveProvider()?.model;
   if (!aiClient || !model) {
-    return res.status(503).json({
-      error:
-        'scanning unavailable — add GROQ_API_KEY (recommended, e.g. gsk_...) or OPENAI_API_KEY to caly-ai-backend/.env and restart the server',
-    });
+    // Generic on purpose: setup paths and key names don't belong in API errors.
+    return res.status(503).json({ error: 'image scanning is temporarily unavailable — please try again later' });
+  }
+  if (!isImageBuffer(req.file.buffer)) {
+    return res.status(400).json({ error: 'only photo files are accepted' });
   }
   try {
     const b64 = req.file.buffer.toString('base64');
@@ -176,7 +195,8 @@ router.get('/barcode/:code', async (req, res) => {
     let upstreamOk = false;
     for (const candidate of candidates) {
       const offRes = await fetch(
-        `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(candidate)}.json?fields=product_name,brands,nutriments,serving_quantity,serving_unit`
+        `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(candidate)}.json?fields=product_name,brands,nutriments,serving_quantity,serving_unit`,
+        { signal: AbortSignal.timeout(10000) }
       ).catch(() => null);
       if (!offRes || !offRes.ok) continue;
       upstreamOk = true;
@@ -213,6 +233,43 @@ router.get('/barcode/:code', async (req, res) => {
   }
 });
 
+const { connectCloudinary, cloudinaryStatus } = require('../config/cloudinary');
+
+// Persist a KEPT meal photo (scan-time upload would orphan every discarded
+// retake). Bytes ride the same multer pipeline; the client calls this once
+// at Save and stores the returned CDN URL on the meal.
+function uploadBuffer(buffer) {
+  const cloudinary = connectCloudinary();
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder: 'caly/meals', resource_type: 'image' },
+      (err, result) => (err ? reject(err) : resolve(result))
+    );
+    stream.end(buffer);
+  });
+}
+
+// POST /api/scan/image (multipart field "image") -> { imageUrl }
+router.post('/image', upload.single('image'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'image file required (multipart field "image")' });
+  }
+  if (!isImageBuffer(req.file.buffer)) {
+    return res.status(400).json({ error: 'only photo files are accepted' });
+  }
+  if (!cloudinaryStatus().configured) {
+    return res.status(503).json({ error: 'photo storage is temporarily unavailable — saving without a photo' });
+  }
+  try {
+    const result = await uploadBuffer(req.file.buffer);
+    if (!result?.secure_url) throw new Error('upload returned no URL');
+    res.json({ imageUrl: result.secure_url });
+  } catch (e) {
+    console.error('photo upload error:', e.message);
+    res.status(502).json({ error: 'could not store the photo — saving without it' });
+  }
+});
+
 module.exports = router;
 module.exports.LABEL_SCHEMA = LABEL_SCHEMA;
-module.exports.scanHelpers = { toNum, servingGrams };
+module.exports.scanHelpers = { toNum, servingGrams, isImageBuffer };

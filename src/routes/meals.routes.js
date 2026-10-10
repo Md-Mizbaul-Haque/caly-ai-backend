@@ -8,12 +8,18 @@ const { dayBounds, requestTimezone } = require('../utils/timezone');
 const mealBodySchema = z.object({
   name: z.string().trim().min(1, 'name is required').max(120),
   kcal: z.number().gt(0).lte(10000),
-  protein: z.number().min(0).default(0),
-  carbs: z.number().min(0).default(0),
-  fat: z.number().min(0).default(0),
+  protein: z.number().min(0).max(5000).default(0),
+  carbs: z.number().min(0).max(5000).default(0),
+  fat: z.number().min(0).max(5000).default(0),
   mealType: z.enum(['Breakfast', 'Lunch', 'Dinner', 'Snack']).default('Snack'),
-  emoji: z.string().default('🍽️'),
-  imageUrl: z.string().max(2000).optional(),
+  emoji: z.string().max(20).default('🍽️'),
+  imageUrl: z
+    .string()
+    .max(2000)
+    // Only portable references: native file:// photos and http(s) CDN URLs.
+    // data:/blob:/javascript: either bloat every diary fetch or invite trouble.
+    .refine((v) => /^(https?|file):\/\//.test(v), { message: 'imageUrl must be an http(s) or file URL' })
+    .optional(),
   loggedAt: z.string().datetime({ offset: true }).optional(),
 });
 

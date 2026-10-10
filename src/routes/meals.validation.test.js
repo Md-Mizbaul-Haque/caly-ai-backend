@@ -18,6 +18,17 @@ describe('mealBodySchema', () => {
   it('rejects string kcal', () => {
     assert.equal(mealBodySchema.safeParse({ name: 'X', kcal: '320' }).success, false);
   });
+  it('allows http(s) and file image URLs, rejects the rest', () => {
+    const ok = (imageUrl) => mealBodySchema.safeParse({ name: 'X', kcal: 100, imageUrl }).success;
+    assert.equal(ok('https://cdn/x.jpg'), true);
+    assert.equal(ok('file:///a.jpg'), true);
+    assert.equal(ok('data:image/png;base64,AAA'), false);
+    assert.equal(ok('javascript:alert(1)'), false);
+  });
+  it('caps macros so one row cannot skew averages', () => {
+    assert.equal(mealBodySchema.safeParse({ name: 'X', kcal: 100, protein: 99999 }).success, false);
+    assert.equal(mealBodySchema.safeParse({ name: 'X', kcal: 100, protein: 25 }).success, true);
+  });
 });
 
 describe('Meal model', () => {
