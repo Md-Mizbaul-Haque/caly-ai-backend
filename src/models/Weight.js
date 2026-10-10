@@ -9,6 +9,10 @@ const weightSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Every range query filters one owner's docs by day window, so the
+// compound index (not the two single-field ones) serves them.
+weightSchema.index({ userId: 1, loggedAt: 1 });
+
 weightSchema.set('toJSON', {
   transform: (_doc, ret) => {
     ret.id = ret._id.toString();
