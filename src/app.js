@@ -15,7 +15,7 @@ const corsOptions = process.env.CORS_ORIGINS
   ? { origin: process.env.CORS_ORIGINS.split(',').map(s => s.trim()) }
   : {};
 app.use(cors(corsOptions));
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '10mb' })); // JSON only — photos ride multipart (multer), never base64 JSON
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 const apiLimiter = rateLimit({

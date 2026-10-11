@@ -16,7 +16,7 @@ router.use(requireAuth);
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB, mirrors express.json limit
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB raw bytes (multipart only — not comparable to the JSON body limit)
   fileFilter: (_req, file, cb) => {
     // Non-images would burn a paid vision call just to 422 — reject early.
     if (/^image\//.test(file.mimetype || '')) return cb(null, true);

@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Caly AI backend - Express + MongoDB + OpenAI calorie tracking API",
   "main": "src/index.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
