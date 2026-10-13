@@ -10,3 +10,34 @@
 MongoDB connected db: caly-ai
 Caly AI API running on http://localhost:5000
 [0mGET /health [32m200[0m 9.362 ms - 37[0m
+[0mGET /api/auth/me [36m304[0m 229.805 ms - -[0m
+[0mGET /api/meals?from=2026-10-04&to=2026-10-10&tz=Asia%2FDhaka [36m304[0m 412.270 ms - -[0m
+[32m[nodemon] restarting due to changes...[39m
+[32m[nodemon] starting `node src/index.js`[39m
+MongoDB connected db: caly-ai
+Caly AI API running on http://localhost:5000
+[32m[nodemon] restarting due to changes...[39m
+[32m[nodemon] restarting due to changes...[39m
+[32m[nodemon] starting `node src/index.js`[39m
+MongoDB connected db: caly-ai
+Caly AI API running on http://localhost:5000
+[32m[nodemon] restarting due to changes...[39m
+[32m[nodemon] starting `node src/index.js`[39m
+MongoDB connected db: caly-ai
+Caly AI API running on http://localhost:5000
+[0mPOST /api/auth/login [32m200[0m 988.729 ms - 566[0m
+[0mPOST /api/scan [33m400[0m 65.132 ms - 59[0m
+[0mPOST /api/scan/image [33m400[0m 60.061 ms - 59[0m
+[32m[nodemon] restarting due to changes...[39m
+[32m[nodemon] starting `node src/index.js`[39m
+MongoDB connected db: caly-ai
+Caly AI API running on http://localhost:5000
+[0mGET /health [32m200[0m 14.489 ms - 37[0m
+[0mPOST /api/auth/login [32m200[0m 286.859 ms - 566[0m
+[0mPOST /api/scan [33m400[0m 74.787 ms - 59[0m
+[0mPOST /api/scan/image [33m400[0m 59.956 ms - 59[0m
+[32m[nodemon] restarting due to changes...[39m
+[32m[nodemon] starting `node src/index.js`[39m
+MongoDB connected db: caly-ai
+Caly AI API running on http://localhost:5000
+[31m[nodemon] app crashed - waiting for file changes before starting...[39m
