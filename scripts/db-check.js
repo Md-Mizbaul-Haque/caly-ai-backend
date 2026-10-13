@@ -14,7 +14,19 @@ async function countIn(dbName) {
   }
 }
 
+
+
 (async () => {
   await countIn('caly-ai');
   await countIn('test');
 })().catch((e) => { console.error(e.message); process.exit(1); });
+
+
+
+
+
+
+
+
+
+
