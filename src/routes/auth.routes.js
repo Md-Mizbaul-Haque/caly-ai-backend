@@ -59,16 +59,24 @@ function invalid(res, details) {
   return res.status(400).json({ error: 'invalid request', details });
 }
 
+// Saves the code, then tries email. Returns true when the email went out;
+// a down SMTP must never fail (or hang past mailer timeouts) the request.
 async function issueVerifyCode(user) {
   const code = generateCode();
   user.verifyCodeHash = hashCode(code);
   user.verifyCodeExpiresAt = codeExpiry();
   user.verifyCodeAttempts = 0;
   await user.save();
-  await sendMail({
-    to: user.email,
-    ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
-  });
+  try {
+    await sendMail({
+      to: user.email,
+      ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
+    });
+    return true;
+  } catch (e) {
+    console.warn(`[auth] email send failed to=${user.email}: ${e.message}`);
+    return false;
+  }
 }
 
 async function issuePendingCode(pending) {
@@ -77,10 +85,16 @@ async function issuePendingCode(pending) {
   pending.codeExpiresAt = codeExpiry();
   pending.codeAttempts = 0;
   await pending.save();
-  await sendMail({
-    to: pending.email,
-    ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
-  });
+  try {
+    await sendMail({
+      to: pending.email,
+      ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
+    });
+    return true;
+  } catch (e) {
+    console.warn(`[auth] email send failed to=${pending.email}: ${e.message}`);
+    return false;
+  }
 }
 
 async function issueResetCode(user) {
@@ -89,10 +103,16 @@ async function issueResetCode(user) {
   user.resetCodeExpiresAt = codeExpiry();
   user.resetCodeAttempts = 0;
   await user.save();
-  await sendMail({
-    to: user.email,
-    ...passwordResetEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
-  });
+  try {
+    await sendMail({
+      to: user.email,
+      ...passwordResetEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
+    });
+    return true;
+  } catch (e) {
+    console.warn(`[auth] email send failed to=${user.email}: ${e.message}`);
+    return false;
+  }
 }
 
 // POST /api/auth/register — creates a PENDING registration, not a user.
@@ -119,8 +139,8 @@ router.post('/register', async (req, res) => {
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
   const pending = await PendingRegistration.findOne({ email });
-  await issuePendingCode(pending);
-  res.status(201).json({ requiresVerification: true });
+  const emailSent = await issuePendingCode(pending);
+  res.status(201).json({ requiresVerification: true, emailSent });
 });
 
 // POST /api/auth/login
@@ -136,8 +156,8 @@ router.post('/login', async (req, res) => {
     // email on wrong password — no enumeration.
     const pending = await PendingRegistration.findOne({ email });
     if (pending && (await passwordMatches(password, pending.passwordHash))) {
-      await issuePendingCode(pending);
-      return res.status(403).json({ error: 'email not verified — a new code has been sent', needsVerification: true });
+      const emailSent = await issuePendingCode(pending);
+      return res.status(403).json({ error: 'email not verified — a new code has been sent', needsVerification: true, emailSent });
     }
     return res.status(401).json({ error: 'invalid email or password' });
   }
@@ -145,8 +165,8 @@ router.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'invalid email or password' });
   }
   if (!user.emailVerified) {
-    await issueVerifyCode(user);
-    return res.status(403).json({ error: 'email not verified — a new code has been sent', needsVerification: true });
+    const emailSent = await issueVerifyCode(user);
+    return res.status(403).json({ error: 'email not verified — a new code has been sent', needsVerification: true, emailSent });
   }
   res.json({ token: signToken(user), user });
 });
@@ -183,8 +203,8 @@ router.post('/resend-code', async (req, res) => {
   const parsed = z.object({ email: emailSchema }).safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
   const pending = await PendingRegistration.findOne({ email: parsed.data.email });
-  if (pending) await issuePendingCode(pending);
-  res.json({ ok: true });
+  const emailSent = pending ? await issuePendingCode(pending) : true;
+  res.json({ ok: true, emailSent });
 });
 
 const skipSchema = z.object({ email: emailSchema });
@@ -212,8 +232,8 @@ router.post('/forgot-password', async (req, res) => {
   const parsed = z.object({ email: emailSchema }).safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
   const user = await User.findOne({ email: parsed.data.email });
-  if (user) await issueResetCode(user);
-  res.json({ ok: true });
+  const emailSent = user ? await issueResetCode(user) : true;
+  res.json({ ok: true, emailSent });
 });
 
 // POST /api/auth/reset-password

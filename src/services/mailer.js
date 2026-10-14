@@ -6,18 +6,25 @@ const testInboxEnabled = process.env.CALY_TEST_INBOX === '1';
 const sentEmails = [];
 
 let transporter = null;
+const SMTP_TIMEOUT_MS = 10000; // Render -> Gmail can black-hole; never hang a request past this per phase
+
+function buildSmtpOptions() {
+  return {
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT) || 587,
+    secure: process.env.SMTP_SECURE === '1',
+    auth: process.env.SMTP_USER
+      ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+      : undefined,
+    connectionTimeout: SMTP_TIMEOUT_MS,
+    greetingTimeout: SMTP_TIMEOUT_MS,
+    socketTimeout: SMTP_TIMEOUT_MS,
+  };
+}
+
 function getTransporter() {
   if (!process.env.SMTP_HOST) return null;
-  if (!transporter) {
-    transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT) || 587,
-      secure: process.env.SMTP_SECURE === '1',
-      auth: process.env.SMTP_USER
-        ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-        : undefined,
-    });
-  }
+  if (!transporter) transporter = nodemailer.createTransport(buildSmtpOptions());
   return transporter;
 }
 
@@ -49,4 +56,4 @@ function extractCode(text) {
   return m ? m[1] : null;
 }
 
-module.exports = { sendMail, getTestInbox, clearTestInbox, extractCode };
+module.exports = { sendMail, getTestInbox, clearTestInbox, extractCode, buildSmtpOptions };
