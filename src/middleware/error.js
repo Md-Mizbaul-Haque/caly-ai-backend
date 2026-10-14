@@ -19,6 +19,8 @@ function errorHandler(err, req, res, next) { // eslint-disable-line no-unused-va
   if (process.env.NODE_ENV === 'production' && !hasStatus) message = 'Internal server error';
   if (status >= 500) console.error(err);
   const body = { error: message };
+  // Lets a user's "Ref #abc123" map to one backend log line.
+  if (req.reqId) body.reqId = req.reqId;
   if (status >= 500 && process.env.NODE_ENV !== 'production') body.stack = err.stack;
   res.status(status).json(body);
 }

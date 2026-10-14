@@ -5,6 +5,7 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const { dbUp } = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/error');
+const { requestIdMiddleware } = require('./utils/requestId');
 
 const app = express();
 
@@ -16,6 +17,7 @@ const corsOptions = process.env.CORS_ORIGINS
   : {};
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '10mb' })); // JSON only — photos ride multipart (multer), never base64 JSON
+app.use(requestIdMiddleware); // echo X-Request-Id (the app's Ref #) for log correlation
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 const apiLimiter = rateLimit({
