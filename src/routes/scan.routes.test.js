@@ -54,3 +54,30 @@ describe('scanHelpers (barcode math)', () => {
     assert.equal(scanHelpers.isImageBuffer(null), false);
   });
 });
+
+const { scanHelpers: scanHelpers2 } = require('./scan.routes');
+
+describe('lookupOffProduct (upstream accounting)', () => {
+  const { lookupOffProduct } = scanHelpers2;
+
+  it('treats an upstream 404 as reachable (product missing, not lookup failed)', async () => {
+    const notFound = { ok: false, status: 404, json: async () => ({ status: 0 }) };
+    const out = await lookupOffProduct(['0000000000000'], async () => notFound);
+    assert.equal(out.upstreamOk, true);
+    assert.equal(out.data, null);
+  });
+
+  it('returns product data on 200 with status 1', async () => {
+    const product = { product_name: 'X', nutriments: {} };
+    const ok = { ok: true, status: 200, json: async () => ({ status: 1, product }) };
+    const out = await lookupOffProduct(['3017620422003'], async () => ok);
+    assert.equal(out.upstreamOk, true);
+    assert.equal(out.data.product, product);
+  });
+
+  it('reports unreachable only when every attempt throws', async () => {
+    const out = await lookupOffProduct(['3017620422003', '03017620422003'], async () => { throw new Error('boom'); });
+    assert.equal(out.upstreamOk, false);
+    assert.equal(out.data, null);
+  });
+});

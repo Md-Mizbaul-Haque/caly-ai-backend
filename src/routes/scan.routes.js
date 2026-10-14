@@ -125,6 +125,11 @@ function parseJsonLoose(text) {
 
 // POST /api/scan  (multipart field "image")
 router.post('/', upload.single('image'), async (req, res) => {
+  // One line per scan: outcome + latency, keyed by the shared request ID.
+  const t0 = Date.now();
+  res.on('finish', () => {
+    console.info(`[scan ${req.reqId || '-'}] POST /api/scan -> ${res.statusCode} ${Date.now() - t0}ms`);
+  });
   if (!req.file) {
     return res.status(400).json({ error: 'image file required (multipart field "image")' });
   }
@@ -182,6 +187,26 @@ function servingGrams(quantity, unit) {
   return Number.isFinite(g) && g > 0 ? g : null;
 }
 
+// Any HTTP answer (even 404) proves OpenFoodFacts is reachable; only a
+// thrown fetch (network/timeout) means unreachable. Injectable fetchFn
+// exists for unit tests — the route passes the global fetch.
+async function lookupOffProduct(candidates, fetchFn = fetch) {
+  let upstreamOk = false;
+  let data = null;
+  for (const candidate of candidates) {
+    const offRes = await fetchFn(
+      `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(candidate)}.json?fields=product_name,brands,nutriments,serving_quantity,serving_unit`,
+      { signal: AbortSignal.timeout(10000) }
+    ).catch(() => null);
+    if (!offRes) continue;
+    upstreamOk = true;
+    if (!offRes.ok) continue;
+    data = await offRes.json().catch(() => null);
+    if (data && data.status === 1 && data.product) break;
+  }
+  return { upstreamOk, data };
+}
+
 // GET /api/scan/barcode/:code — look up a packaged food via OpenFoodFacts
 router.get('/barcode/:code', async (req, res) => {
   const code = String(req.params.code || '').trim();
@@ -191,18 +216,7 @@ router.get('/barcode/:code', async (req, res) => {
   try {
     // OpenFoodFacts indexes EAN-13 as-is; UPC-A (12-digit) is stored with a leading 0
     const candidates = code.length === 12 ? [code, `0${code}`] : [code];
-    let data = null;
-    let upstreamOk = false;
-    for (const candidate of candidates) {
-      const offRes = await fetch(
-        `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(candidate)}.json?fields=product_name,brands,nutriments,serving_quantity,serving_unit`,
-        { signal: AbortSignal.timeout(10000) }
-      ).catch(() => null);
-      if (!offRes || !offRes.ok) continue;
-      upstreamOk = true;
-      data = await offRes.json().catch(() => null);
-      if (data && data.status === 1 && data.product) break;
-    }
+    const { upstreamOk, data } = await lookupOffProduct(candidates);
     if (!upstreamOk) {
       return res.status(502).json({ error: 'barcode lookup failed' });
     }
@@ -272,4 +286,4 @@ router.post('/image', upload.single('image'), async (req, res) => {
 
 module.exports = router;
 module.exports.LABEL_SCHEMA = LABEL_SCHEMA;
-module.exports.scanHelpers = { toNum, servingGrams, isImageBuffer };
+module.exports.scanHelpers = { toNum, servingGrams, isImageBuffer, lookupOffProduct };
