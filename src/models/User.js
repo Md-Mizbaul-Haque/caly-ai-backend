@@ -25,6 +25,7 @@ const userSchema = new mongoose.Schema(
     weightKg: { type: Number, min: 25, max: 350, default: null },
     targetWeightKg: { type: Number, min: 25, max: 350, default: null },
     activityLevel: { type: String, enum: ['sedentary', 'light', 'moderate', 'high'], default: null },
+    goalPace: { type: String, enum: ['slow', 'steady', 'fast'], default: null },
     onboardingCompleted: { type: Boolean, default: false },
     verifyCodeHash: { type: String, default: null },
     verifyCodeExpiresAt: { type: Date, default: null },

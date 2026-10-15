@@ -57,4 +57,36 @@ describe('nutritionPlan service — medical safety', () => {
     const lose = buildNutritionPlan({ gender: 'female', birthDate: '1995-01-01', heightCm: 165, weightKg: 80, targetWeightKg: 65, activityLevel: 'light' });
     assert.equal(lose.proteinG, Math.round(2.0 * 80));
   });
+  it('pace controls deficit: slow -250 / steady -500 / fast -750 (clamped)', () => {
+    const base = { gender: 'male', birthDate: '1990-01-01', heightCm: 180, weightKg: 90, targetWeightKg: 80, activityLevel: 'moderate' };
+    const slow = buildNutritionPlan({ ...base, pace: 'slow' });
+    const steady = buildNutritionPlan({ ...base, pace: 'steady' });
+    const fast = buildNutritionPlan({ ...base, pace: 'fast' });
+    assert.equal(slow.dailyGoalKcal, slow.maintenance - 250);
+    assert.equal(steady.dailyGoalKcal, steady.maintenance - 500);
+    assert.equal(fast.dailyGoalKcal, fast.maintenance - 750);
+    assert.ok(fast.dailyGoalKcal < steady.dailyGoalKcal && steady.dailyGoalKcal < slow.dailyGoalKcal);
+  });
+  it('pace never breaches safe floors (sex floor + BMR)', () => {
+    const base = { gender: 'female', birthDate: '1990-01-01', heightCm: 155, weightKg: 55, targetWeightKg: 45, activityLevel: 'sedentary' };
+    const fast = buildNutritionPlan({ ...base, pace: 'fast' });
+    assert.ok(fast.dailyGoalKcal >= 1200);
+    assert.ok(fast.dailyGoalKcal >= fast.bmr);
+    assert.ok(fast.dailyGoalKcal <= fast.maintenance);
+  });
+  it('teen fast pace is capped at small deficit + warning', () => {
+    const p = buildNutritionPlan({ gender: 'male', birthDate: '2010-06-01', heightCm: 170, weightKg: 70, targetWeightKg: 60, activityLevel: 'moderate', pace: 'fast' });
+    assert.ok(p.dailyGoalKcal >= 1800);
+    assert.ok(p.warnings.some((w) => w.toLowerCase().includes('teen')));
+  });
+  it('gain pace controls surplus: slow +250 / steady +400 / fast +500', () => {
+    const base = { gender: 'male', birthDate: '1995-01-01', heightCm: 180, weightKg: 70, targetWeightKg: 80, activityLevel: 'moderate' };
+    assert.equal(buildNutritionPlan({ ...base, pace: 'slow' }).dailyGoalKcal - buildNutritionPlan({ ...base, pace: 'slow' }).maintenance, 250);
+    assert.equal(buildNutritionPlan({ ...base, pace: 'steady' }).dailyGoalKcal - buildNutritionPlan({ ...base, pace: 'steady' }).maintenance, 400);
+    assert.equal(buildNutritionPlan({ ...base, pace: 'fast' }).dailyGoalKcal - buildNutritionPlan({ ...base, pace: 'fast' }).maintenance, 500);
+  });
+  it('exposes etaWeeks from pace rate', () => {
+    const p = buildNutritionPlan({ gender: 'male', birthDate: '1990-01-01', heightCm: 180, weightKg: 90, targetWeightKg: 80, activityLevel: 'moderate', pace: 'steady' });
+    assert.equal(p.etaWeeks, 20);
+  });
 });

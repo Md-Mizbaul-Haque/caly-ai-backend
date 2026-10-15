@@ -91,6 +91,25 @@ const LABEL_SCHEMA = z.object({
     .max(6),
 });
 
+// Groq answers quota exhaustion as HTTP 429 (SDK throws with status/code).
+// Anything else (network, model, parse) stays a 502 — never leak provider text.
+function isQuotaError(e) {
+  if (!e || typeof e !== 'object') return false;
+  if (e.status === 429 || e.statusCode === 429) return true;
+  const code = String(e.code || e?.error?.code || '').toLowerCase();
+  if (code.includes('429') || code.includes('rate_limit') || code.includes('rate-limit')) return true;
+  const msg = `${e.message || ''} ${e?.error?.message || ''}`.toLowerCase();
+  return msg.includes('429')
+    || msg.includes('rate limit')
+    || msg.includes('rate_limit')
+    || msg.includes('too many requests')
+    || msg.includes('quota')
+    || msg.includes('rpd')
+    || msg.includes('tpd')
+    || msg.includes('tokens per')
+    || msg.includes('requests per day');
+}
+
 // Magic numbers, not client mimetypes: a spoofed Content-Type must not reach
 // the paid vision call (or Cloudinary). Covers JPEG/PNG/GIF/WebP.
 function isImageBuffer(buf) {
@@ -165,6 +184,10 @@ router.post('/', upload.single('image'), async (req, res) => {
     }
     res.json({ items: parsed.data.items });
   } catch (e) {
+    if (isQuotaError(e)) {
+      console.warn(`[scan ${req.reqId || '-'}] quota exhausted: ${e.message}`);
+      return res.status(429).json({ error: 'daily scan limit reached — please try again tomorrow' });
+    }
     console.error('scan error:', e.message);
     res.status(502).json({ error: 'failed to analyze image' });
   }
@@ -286,4 +309,4 @@ router.post('/image', upload.single('image'), async (req, res) => {
 
 module.exports = router;
 module.exports.LABEL_SCHEMA = LABEL_SCHEMA;
-module.exports.scanHelpers = { toNum, servingGrams, isImageBuffer, lookupOffProduct };
+module.exports.scanHelpers = { toNum, servingGrams, isImageBuffer, isQuotaError, lookupOffProduct };

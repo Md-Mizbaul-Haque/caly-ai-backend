@@ -8,10 +8,14 @@ describe('profileSchema', () => {
     const r = profileSchema.safeParse({ gender: 'female', activityLevel: 'light', weightKg: 70 });
     assert.equal(r.success, true);
   });
-  it('rejects bad enum, out-of-range weight, under-500 goal', () => {
+  it('rejects bad enum, out-of-range weight', () => {
     assert.equal(profileSchema.safeParse({ gender: 'x' }).success, false);
     assert.equal(profileSchema.safeParse({ weightKg: 5 }).success, false);
-    assert.equal(profileSchema.safeParse({ dailyGoalKcal: 100 }).success, false);
+  });
+  it('strips client dailyGoalKcal — the server owns the target', () => {
+    const r = profileSchema.safeParse({ dailyGoalKcal: 2500 });
+    assert.equal(r.success, true);
+    assert.equal(r.data.dailyGoalKcal, undefined);
   });
   it('accepts empty object (no-op update)', () => {
     assert.equal(profileSchema.safeParse({}).success, true);

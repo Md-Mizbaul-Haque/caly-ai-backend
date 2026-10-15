@@ -270,13 +270,16 @@ router.get('/me', requireAuth.allowUnverified, (req, res) => {
 const genderSchema = z.enum(['male', 'female', 'nonbinary', 'prefer_not_to_say']);
 const activitySchema = z.enum(['sedentary', 'light', 'moderate', 'high']);
 const profileSchema = z.object({
-  dailyGoalKcal: z.number().int('dailyGoalKcal must be an integer').gte(500).lte(10000).optional(),
+  // No dailyGoalKcal: the server owns the target (recomputed on onboarding
+  // completion and weight-goal saves). Unknown keys are stripped, so a
+  // tampered client can never inject a manual calorie number.
   gender: genderSchema.optional(),
   birthDate: z.coerce.date().refine((d) => d <= new Date(Date.now() - 13 * 365.25 * 24 * 3600 * 1000), 'you must be at least 13 years old').optional(),
   heightCm: z.number().gte(100).lte(250).optional(),
   weightKg: z.number().gte(25).lte(350).optional(),
   targetWeightKg: z.number().gte(25).lte(350).optional(),
   activityLevel: activitySchema.optional(),
+  goalPace: z.enum(['slow', 'steady', 'fast']).optional(),
   onboardingCompleted: z.boolean().optional(),
   // Client's IANA zone (e.g. 'Asia/Dhaka'). Normalized server-side: anything
   // unusable becomes 'UTC' instead of a 400, so days always have a zone.

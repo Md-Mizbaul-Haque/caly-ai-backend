@@ -55,6 +55,19 @@ describe('scanHelpers (barcode math)', () => {
   });
 });
 
+describe('isQuotaError (Groq rate-limit detection)', () => {
+  const { isQuotaError } = scanHelpers;
+
+  it('flags provider 429 shapes, ignores real failures', () => {
+    assert.equal(typeof isQuotaError, 'function');
+    assert.equal(isQuotaError({ status: 429, message: 'Rate limit exceeded' }), true);
+    assert.equal(isQuotaError({ code: 'rate_limit_exceeded', message: 'slow down' }), true);
+    assert.equal(isQuotaError(new Error('Request was rejected due to a rate limit (RPD 1000)')), true);
+    assert.equal(isQuotaError(new Error('boom')), false);
+    assert.equal(isQuotaError(null), false);
+  });
+});
+
 const { scanHelpers: scanHelpers2 } = require('./scan.routes');
 
 describe('lookupOffProduct (upstream accounting)', () => {
