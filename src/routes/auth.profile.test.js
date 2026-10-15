@@ -33,6 +33,16 @@ describe('User onboarding defaults', () => {
     const json = u.toJSON();
     assert.equal(json.onboardingCompleted, false);
   });
+  it('defaults the login throttle + token version and keeps them out of JSON', () => {
+    const u = new User({ name: 'A', email: 'a@b.co', passwordHash: 'x'.repeat(60) });
+    assert.equal(u.failedLoginAttempts, 0);
+    assert.equal(u.loginLockedUntil, null);
+    assert.equal(u.tokenVersion, 0);
+    const json = u.toJSON();
+    assert.equal(json.failedLoginAttempts, undefined);
+    assert.equal(json.loginLockedUntil, undefined);
+    assert.equal(json.tokenVersion, undefined);
+  });
 });
 
 describe('profileSchema timezone', () => {

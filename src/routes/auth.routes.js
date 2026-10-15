@@ -12,6 +12,8 @@ const { verificationEmail, passwordResetEmail } = require('../services/emailTemp
 const {
   CODE_TTL_MINUTES,
   MAX_RESET_ATTEMPTS,
+  MAX_LOGIN_ATTEMPTS,
+  LOGIN_LOCK_MS,
   signToken,
   generateCode,
   hashCode,
@@ -115,6 +117,38 @@ async function issueResetCode(user) {
   }
 }
 
+// Checks a 6-digit code against a doc whose code fields are named
+// `${prefix}Hash`, `${prefix}ExpiresAt`, `${prefix}Attempts` — PendingRegistration
+// uses prefix 'code', the unverified User row (skip-verification accounts) uses
+// 'verifyCode'. Bumps + persists attempts on a miss so brute force stays capped.
+// Returns 'ok' | 'expired' | 'locked' | 'bad'.
+async function checkCode(doc, prefix, code) {
+  const hash = doc[`${prefix}Hash`];
+  const expiresAt = doc[`${prefix}ExpiresAt`];
+  const attempts = doc[`${prefix}Attempts`] || 0;
+  if (!hash || !expiresAt || expiresAt <= new Date()) return 'expired';
+  if (attempts >= MAX_RESET_ATTEMPTS) return 'locked';
+  if (!codesMatch(code, hash)) {
+    doc[`${prefix}Attempts`] = attempts + 1;
+    await doc.save();
+    return 'bad';
+  }
+  return 'ok';
+}
+
+// Per-account throttle: after MAX_LOGIN_ATTEMPTS wrong passwords the account
+// locks for LOGIN_LOCK_MS. A correct password still counts as a fresh start.
+async function registerFailedLogin(user) {
+  const attempts = (user.failedLoginAttempts || 0) + 1;
+  if (attempts >= MAX_LOGIN_ATTEMPTS) {
+    user.failedLoginAttempts = 0;
+    user.loginLockedUntil = new Date(Date.now() + LOGIN_LOCK_MS);
+  } else {
+    user.failedLoginAttempts = attempts;
+  }
+  await user.save();
+}
+
 // POST /api/auth/register — creates a PENDING registration, not a user.
 // The User row is created only after verify-email (or skip-verification).
 router.post('/register', async (req, res) => {
@@ -127,18 +161,25 @@ router.post('/register', async (req, res) => {
     if (existing.emailVerified) {
       return res.status(409).json({ error: 'an account with this email already exists' });
     }
-    // Stale unverified row from before verify-first — drop it; the pending
-    // below becomes the single source of truth for this email.
-    await User.deleteOne({ _id: existing._id });
+    // Unverified account (e.g. "Skip for now"): reuse the row instead of
+    // deleting it — it may already own onboarding data (seeded weight rows),
+    // and deleting it would orphan that data. Refresh the credentials the user
+    // just typed and re-issue the code; verify-email's User fallback completes
+    // this same account. Drop any leftover pending so verify cannot create a
+    // duplicate User for the same email.
+    await PendingRegistration.deleteOne({ email });
+    existing.name = name;
+    existing.passwordHash = await hashPassword(password);
+    const emailSent = await issueVerifyCode(existing);
+    return res.status(201).json({ requiresVerification: true, emailSent });
   }
 
   const passwordHash = await hashPassword(password);
-  await PendingRegistration.findOneAndUpdate(
+  const pending = await PendingRegistration.findOneAndUpdate(
     { email },
     { name, email, passwordHash },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
-  const pending = await PendingRegistration.findOne({ email });
   const emailSent = await issuePendingCode(pending);
   res.status(201).json({ requiresVerification: true, emailSent });
 });
@@ -161,50 +202,75 @@ router.post('/login', async (req, res) => {
     }
     return res.status(401).json({ error: 'invalid email or password' });
   }
+  if (user.loginLockedUntil && user.loginLockedUntil > new Date()) {
+    return res.status(429).json({ error: 'too many attempts — try again in a few minutes' });
+  }
   if (!(await passwordMatches(password, user.passwordHash))) {
+    await registerFailedLogin(user);
     return res.status(401).json({ error: 'invalid email or password' });
   }
   if (!user.emailVerified) {
     const emailSent = await issueVerifyCode(user);
     return res.status(403).json({ error: 'email not verified — a new code has been sent', needsVerification: true, emailSent });
   }
+  if (user.failedLoginAttempts || user.loginLockedUntil) {
+    user.failedLoginAttempts = 0;
+    user.loginLockedUntil = null;
+    await user.save();
+  }
   res.json({ token: signToken(user), user });
 });
 
 // POST /api/auth/verify-email — confirms a pending registration and
-// creates the User row (verified) in the same step.
+// creates the User row (verified) in the same step. For an account that
+// already exists but is unverified (the "Skip for now" path), it verifies
+// that existing row in place so its data is preserved.
 router.post('/verify-email', async (req, res) => {
   const parsed = verifySchema.safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
   const { email, code } = parsed.data;
 
   const pending = await PendingRegistration.findOne({ email });
-  if (!pending || !pending.codeHash || !pending.codeExpiresAt || pending.codeExpiresAt <= new Date()) {
-    return res.status(400).json({ error: 'verification code is invalid or expired' });
-  }
-  if (pending.codeAttempts >= MAX_RESET_ATTEMPTS) {
-    return res.status(429).json({ error: 'too many attempts — request a new code' });
-  }
-  if (!codesMatch(code, pending.codeHash)) {
-    pending.codeAttempts += 1;
-    await pending.save();
+  if (pending) {
+    const state = await checkCode(pending, 'code', code);
+    if (state === 'ok') {
+      const user = await User.create({ name: pending.name, email: pending.email, passwordHash: pending.passwordHash });
+      user.emailVerified = true;
+      await user.save();
+      await PendingRegistration.deleteOne({ _id: pending._id });
+      return res.json({ token: signToken(user), user });
+    }
+    if (state === 'locked') return res.status(429).json({ error: 'too many attempts — request a new code' });
     return res.status(400).json({ error: 'verification code is invalid or expired' });
   }
 
-  const user = await User.create({ name: pending.name, email: pending.email, passwordHash: pending.passwordHash });
-  user.emailVerified = true;
-  await user.save();
-  await PendingRegistration.deleteOne({ _id: pending._id });
-  res.json({ token: signToken(user), user });
+  // No pending: only an existing unverified account (skip-verification) can
+  // still verify — its code was issued by login/register onto the User row.
+  const user = await User.findOne({ email });
+  if (user && !user.emailVerified) {
+    const state = await checkCode(user, 'verifyCode', code);
+    if (state === 'ok') {
+      user.emailVerified = true;
+      user.clearVerifyCode();
+      await user.save();
+      return res.json({ token: signToken(user), user });
+    }
+    if (state === 'locked') return res.status(429).json({ error: 'too many attempts — request a new code' });
+  }
+  return res.status(400).json({ error: 'verification code is invalid or expired' });
 });
 
 // POST /api/auth/resend-code — never reveals whether the email exists
 router.post('/resend-code', async (req, res) => {
   const parsed = z.object({ email: emailSchema }).safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
-  const pending = await PendingRegistration.findOne({ email: parsed.data.email });
-  const emailSent = pending ? await issuePendingCode(pending) : true;
-  res.json({ ok: true, emailSent });
+  const { email } = parsed.data;
+  const pending = await PendingRegistration.findOne({ email });
+  if (pending) return res.json({ ok: true, emailSent: await issuePendingCode(pending) });
+  // Existing unverified account (skip-verification): re-issue onto the User row.
+  const user = await User.findOne({ email });
+  if (user && !user.emailVerified) return res.json({ ok: true, emailSent: await issueVerifyCode(user) });
+  res.json({ ok: true, emailSent: true });
 });
 
 const skipSchema = z.object({ email: emailSchema });
@@ -257,9 +323,20 @@ router.post('/reset-password', async (req, res) => {
 
   user.passwordHash = await hashPassword(newPassword);
   user.emailVerified = true; // they proved mailbox ownership
+  // Revoke every token issued before this reset.
+  user.tokenVersion = (user.tokenVersion || 0) + 1;
   user.clearResetCode();
   await user.save();
   res.json({ token: signToken(user), user });
+});
+
+// POST /api/auth/logout — bumps the token version so the caller's token (and
+// any copy of it) is refused from here on. Best-effort: a client that is
+// already unauthenticated just clears local state.
+router.post('/logout', requireAuth.allowUnverified, async (req, res) => {
+  req.user.tokenVersion = (req.user.tokenVersion || 0) + 1;
+  await req.user.save();
+  res.json({ ok: true });
 });
 
 // GET /api/auth/me — onboarding needs the profile before verification.
@@ -367,5 +444,7 @@ router.put('/profile', requireAuth.allowUnverified, async (req, res) => {
 module.exports = router;
 module.exports.profileSchema = profileSchema;
 module.exports.skipSchema = skipSchema;
+module.exports.checkCode = checkCode;
+module.exports.registerFailedLogin = registerFailedLogin;
 module.exports.toLbs = toLbs;
 module.exports.seedTrackingFromOnboarding = seedTrackingFromOnboarding;

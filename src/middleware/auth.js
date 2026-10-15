@@ -28,6 +28,12 @@ async function authorize(req, res, next, allowUnverified) {
       console.warn(`[auth] 401 unknown-user ${req.method} ${req.path}`);
       return res.status(401).json({ error: 'account no longer exists' });
     }
+    // A token minted before a password reset / logout carries an older tv and
+    // must be refused even though its signature still verifies.
+    if ((payload.tv || 0) !== (user.tokenVersion || 0)) {
+      console.warn(`[auth] 401 stale-token ${req.method} ${req.path}`);
+      return res.status(401).json({ error: 'invalid or expired token' });
+    }
     if (!user.emailVerified && !allowUnverified) {
       console.warn(`[auth] 403 unverified ${req.method} ${req.path}`);
       return res.status(403).json({ error: 'email not verified', needsVerification: true });

@@ -4,6 +4,8 @@ const bcrypt = require('bcryptjs');
 
 const CODE_TTL_MINUTES = 10;
 const MAX_RESET_ATTEMPTS = 5;
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
 
 function requireJwtSecret() {
   const secret = process.env.JWT_SECRET;
@@ -13,8 +15,11 @@ function requireJwtSecret() {
   return secret;
 }
 
+// tv (token version) lets a password reset or an explicit logout invalidate
+// every token already handed out: the middleware rejects a token whose tv
+// no longer matches the user's stored tokenVersion.
 function signToken(user) {
-  return jwt.sign({ sub: user.id }, requireJwtSecret(), { expiresIn: '30d' });
+  return jwt.sign({ sub: user.id, tv: user.tokenVersion || 0 }, requireJwtSecret(), { expiresIn: '30d' });
 }
 
 function verifyToken(token) {
@@ -55,6 +60,8 @@ function codeExpiry() {
 module.exports = {
   CODE_TTL_MINUTES,
   MAX_RESET_ATTEMPTS,
+  MAX_LOGIN_ATTEMPTS,
+  LOGIN_LOCK_MS,
   signToken,
   verifyToken,
   generateCode,

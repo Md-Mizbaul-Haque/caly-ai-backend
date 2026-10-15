@@ -33,6 +33,11 @@ const userSchema = new mongoose.Schema(
     resetCodeHash: { type: String, default: null },
     resetCodeExpiresAt: { type: Date, default: null },
     resetCodeAttempts: { type: Number, default: 0 },
+    // Per-account login throttle (the IP limiter alone is easy to rotate around).
+    failedLoginAttempts: { type: Number, default: 0 },
+    loginLockedUntil: { type: Date, default: null },
+    // Bumped on password reset / logout to revoke every issued JWT.
+    tokenVersion: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
@@ -49,6 +54,9 @@ userSchema.set('toJSON', {
     delete ret.resetCodeHash;
     delete ret.resetCodeExpiresAt;
     delete ret.resetCodeAttempts;
+    delete ret.failedLoginAttempts;
+    delete ret.loginLockedUntil;
+    delete ret.tokenVersion;
     return ret;
   },
 });

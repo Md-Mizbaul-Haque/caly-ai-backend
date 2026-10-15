@@ -35,10 +35,12 @@ const authLimiter = rateLimit({
 app.use('/api/auth', authLimiter, require('./routes/auth.routes'));
 
 app.use('/api/meals', require('./routes/meals.routes'));
+app.use('/api/favorites', require('./routes/favorites.routes'));
 app.use('/api/foods', require('./routes/foods.routes'));
 app.use('/api/weights', require('./routes/weights.routes'));
 app.use('/api/scan', require('./routes/scan.routes'));
 app.use('/api/plan', require('./routes/plan.routes'));
+app.use('/api/support', require('./routes/support.routes'));
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', db: dbUp() ? 'up' : 'down', uptime: Math.round(process.uptime()) });
