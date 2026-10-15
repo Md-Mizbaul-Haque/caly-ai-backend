@@ -181,6 +181,18 @@ router.post('/register', async (req, res) => {
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
   const emailSent = await issuePendingCode(pending);
+  // If email failed to send, still create the User row as unverified so the
+  // user can complete onboarding. They'll need to verify later or use
+  // "skip-verification" on next login.
+  if (!emailSent) {
+    await User.create({ name, email, passwordHash, emailVerified: false });
+    await PendingRegistration.deleteOne({ email });
+    return res.status(201).json({ 
+      requiresVerification: true, 
+      emailSent: false,
+      skipVerification: true 
+    });
+  }
   res.status(201).json({ requiresVerification: true, emailSent });
 });
 
