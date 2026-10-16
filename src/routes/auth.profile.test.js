@@ -20,6 +20,11 @@ describe('profileSchema', () => {
   it('accepts empty object (no-op update)', () => {
     assert.equal(profileSchema.safeParse({}).success, true);
   });
+  it('treats null birthDate as absent, never 1970-01-01', () => {
+    const r = profileSchema.safeParse({ birthDate: null });
+    assert.equal(r.success, true);
+    assert.equal(r.data.birthDate, undefined);
+  });
 });
 
 describe('User onboarding defaults', () => {

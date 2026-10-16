@@ -120,3 +120,18 @@ describe('chargeScanQuota (per-user daily scan cap)', () => {
     assert.ok(Number.isInteger(SCAN_DAILY_LIMIT) && SCAN_DAILY_LIMIT >= 1 && SCAN_DAILY_LIMIT <= 500);
   });
 });
+
+describe('refundScanQuota (failed paid calls give the quota back)', () => {
+  const { refundScanQuota } = require('./scan.routes');
+  const todayKey = () => new Date().toISOString().slice(0, 10);
+
+  it('decrements only today\'s non-zero counter (atomic guard in the filter)', async () => {
+    let seen = null;
+    const model = { updateOne: async (filter, update) => { seen = { filter, update }; } };
+    await refundScanQuota('u1', model);
+    assert.equal(seen.filter._id, 'u1');
+    assert.equal(seen.filter.scanDayKey, todayKey());
+    assert.deepEqual(seen.filter.scanCountToday, { $gt: 0 });
+    assert.deepEqual(seen.update, { $inc: { scanCountToday: -1 } });
+  });
+});

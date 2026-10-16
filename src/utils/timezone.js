@@ -40,35 +40,22 @@ function requestTimezone(req) {
   return FALLBACK;
 }
 
-// Offset of `timeZone` at UTC instant `utcMs`, in minutes (east positive).
-// hourCycle h23 avoids the midnight-as-24 rendering edge.
-function offsetMinutesAt(utcMs, tz) {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      hourCycle: 'h23',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    })
-      .formatToParts(new Date(utcMs))
-      .map((p) => [p.type, p.value])
-  );
-  const asUTC = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
-  return (asUTC - utcMs) / 60000;
-}
-
 // UTC instant of zoned-local midnight starting calendar day (y, m, d).
-// Two offset passes absorb DST transitions inside the day.
+// Earliest instant whose zoned calendar date is the target day, found by
+// binary search. A plain offset guess breaks for zones whose DST jump crosses
+// local midnight (America/Santiago spring-forward, Asia/Beirut fall-back
+// returned 23:00 of the previous day).
 function zonedMidnightUtc(y, m, d, tz) {
-  let guess = Date.UTC(y, m - 1, d, 0, 0, 0, 0);
-  for (let i = 0; i < 2; i += 1) {
-    guess = Date.UTC(y, m - 1, d, 0, 0, 0, 0) - offsetMinutesAt(guess, tz) * 60000;
+  const want = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  const center = Date.UTC(y, m - 1, d, 0, 0, 0, 0);
+  let lo = center - 26 * 3600000;
+  let hi = center + 26 * 3600000;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (zonedDateKey(mid, tz) >= want) hi = mid;
+    else lo = mid + 1;
   }
-  return guess;
+  return lo;
 }
 
 function validYmd(s) {
@@ -102,11 +89,19 @@ function localDayWindow(instant, timeZone) {
   return dayBounds(zonedDateKey(instant, tz), tz);
 }
 
-// 'YYYY-MM-DD' of `instant` in `timeZone` (en-CA yields ISO order).
+// 'YYYY-MM-DD' of `instant` in `timeZone` (en-CA yields ISO order). The
+// formatter is cached: dayBounds' binary search formats ~100 instants per
+// call, and Intl construction dominates that cost.
+const dateFormatters = new Map();
 function zonedDateKey(instant, timeZone) {
   const tz = resolveTimezone(timeZone);
+  let fmt = dateFormatters.get(tz);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+    dateFormatters.set(tz, fmt);
+  }
   const d = instant instanceof Date ? instant : new Date(instant);
-  return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+  return fmt.format(d);
 }
 
 module.exports = {

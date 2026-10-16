@@ -9,14 +9,15 @@ const { requestIdMiddleware } = require('./utils/requestId');
 
 const app = express();
 
-app.set('trust proxy', process.env.TRUST_PROXY === '1' ? 1 : false);
-if (process.env.NODE_ENV === 'production' && process.env.TRUST_PROXY !== '1') {
-  console.warn(
-    '[config] TRUST_PROXY is not 1 in production — if this server sits behind a proxy ' +
-    '(Render/Railway/Fly), every client shares one rate-limit bucket and one busy user ' +
-    '429s everyone. Set TRUST_PROXY=1.'
-  );
-}
+// Production deploy target (Render/Railway/Fly) sits behind exactly one
+// proxy hop: without `trust proxy` every user shares the proxy's IP and one
+// bucket, so a busy minute 429s the whole user base. Default to 1 in
+// production; set TRUST_PROXY=0 explicitly for a directly-exposed server.
+const trustProxyEnv = process.env.TRUST_PROXY;
+const trustProxy = trustProxyEnv
+  ? Number(trustProxyEnv)
+  : (process.env.NODE_ENV === 'production' ? 1 : false);
+app.set('trust proxy', Number.isNaN(trustProxy) ? false : trustProxy);
 
 app.use(helmet());
 const corsOptions = process.env.CORS_ORIGINS
@@ -30,14 +31,16 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: Number(process.env.API_LIMIT) || 100,
+  // Mobile carriers CGNAT thousands of users per IP; a per-IP bucket must be
+  // generous or real users 429 through no fault of their own.
+  limit: Number(process.env.API_LIMIT) || 600,
   message: { error: 'Too many requests, please try again later' },
 });
 app.use('/api', apiLimiter);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: Number(process.env.AUTH_LIMIT) || 20,
+  limit: Number(process.env.AUTH_LIMIT) || 50,
   message: { error: 'Too many attempts, please try again later' },
 });
 // Credential endpoints only: these are the brute-forceable/abusable ones.
@@ -59,7 +62,8 @@ app.use('/api/plan', require('./routes/plan.routes'));
 app.use('/api/support', require('./routes/support.routes'));
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', db: dbUp() ? 'up' : 'down', uptime: Math.round(process.uptime()) });
+  const { getMailStatus } = require('./services/mailer');
+  res.json({ status: 'ok', db: dbUp() ? 'up' : 'down', uptime: Math.round(process.uptime()), smtp: getMailStatus() });
 });
 
 app.get('/api', (req, res) => {

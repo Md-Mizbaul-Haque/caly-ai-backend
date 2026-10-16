@@ -24,6 +24,22 @@ async function main() {
     console.warn('Continuing without DB — /health reports db:down, /api routes return 503');
   }
   const server = app.listen(PORT, '0.0.0.0', () => console.log(`Caly AI API running on http://localhost:${PORT}`));
+  // Email self-check (async, never blocks boot): a missing SMTP_HOST means
+  // verification codes are console-logged, NOT sent — scream about it here
+  // so Render logs show the misconfiguration instead of silent no-delivery.
+  // Otherwise verify the relay credentials before the first user registers.
+  const { getTransporter, classifyMailError, validateSmtpConfig } = require('./services/mailer');
+  for (const problem of validateSmtpConfig()) {
+    console.error(`SMTP config: ${problem}`);
+  }
+  if (!process.env.SMTP_HOST) {
+    console.error('SMTP_HOST not set — verification emails will be console-logged, NOT sent. Set SMTP_HOST/PORT/USER/PASS on the host.');
+  } else {
+    getTransporter().verify().then(
+      () => console.log('SMTP relay verified — verification emails can send'),
+      (e) => console.error(`SMTP relay verify failed class=${classifyMailError(e)} code=${e.code || '-'}: ${e.message}`)
+    );
+  }
   function shutdown(signal) {
     console.log(`${signal} received — shutting down`);
     server.close(async () => {

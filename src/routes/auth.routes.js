@@ -7,7 +7,7 @@ const Weight = require('../models/Weight');
 const WeightGoal = require('../models/WeightGoal');
 const { requireAuth } = require('../middleware/auth');
 const { resolveTimezone } = require('../utils/timezone');
-const { sendMail } = require('../services/mailer');
+const { sendMail, classifyMailError } = require('../services/mailer');
 const { verificationEmail, passwordResetEmail } = require('../services/emailTemplates');
 const {
   CODE_TTL_MINUTES,
@@ -76,7 +76,7 @@ async function issueVerifyCode(user) {
     });
     return true;
   } catch (e) {
-    console.warn(`[auth] email send failed to=${user.email}: ${e.message}`);
+    console.warn(`[auth] email send failed to=${user.email} class=${classifyMailError(e)} code=${e.code || '-'}: ${e.message}`);
     return false;
   }
 }
@@ -94,7 +94,7 @@ async function issuePendingCode(pending) {
     });
     return true;
   } catch (e) {
-    console.warn(`[auth] email send failed to=${pending.email}: ${e.message}`);
+    console.warn(`[auth] email send failed to=${pending.email} class=${classifyMailError(e)} code=${e.code || '-'}: ${e.message}`);
     return false;
   }
 }
@@ -112,7 +112,7 @@ async function issueResetCode(user) {
     });
     return true;
   } catch (e) {
-    console.warn(`[auth] email send failed to=${user.email}: ${e.message}`);
+    console.warn(`[auth] email send failed to=${user.email} class=${classifyMailError(e)} code=${e.code || '-'}: ${e.message}`);
     return false;
   }
 }
@@ -184,27 +184,45 @@ router.post('/register', async (req, res) => {
       return res.status(409).json({ error: 'an account with this email already exists' });
     }
     // Unverified account (e.g. "Skip for now"): reuse the row instead of
-    // deleting it — it may already own onboarding data (seeded weight rows),
-    // and deleting it would orphan that data. Refresh the credentials the user
-    // just typed and re-issue the code; verify-email's User fallback completes
-    // this same account. Drop any leftover pending so verify cannot create a
-    // duplicate User for the same email.
+    // deleting it — it may already own onboarding data (seeded weight rows).
+    // SECURITY: credentials refresh ONLY for the original registrant, proven
+    // by the password matching. Anyone who knows just the email must never be
+    // able to plant their own password here — verification would then hand
+    // them the account.
+    if (!(await passwordMatches(password, existing.passwordHash))) {
+      return res.status(409).json({ error: 'this email is already registered — sign in or reset your password' });
+    }
     await PendingRegistration.deleteOne({ email });
     existing.name = name;
-    existing.passwordHash = await hashPassword(password);
-    // Credentials changed: any token minted for the old (unverified) row dies.
+    // Credentials re-confirmed: any token minted for the old (unverified) row dies.
     existing.tokenVersion = (existing.tokenVersion || 0) + 1;
     const emailSent = await issueVerifyCode(existing);
     return res.status(201).json({ requiresVerification: true, emailSent });
   }
 
+  const pending = await PendingRegistration.findOne({ email });
+  if (pending) {
+    // Same guard as above: a re-register with a DIFFERENT password would
+    // silently poison the in-flight registration (the email owner verifies,
+    // the stranger's password opens the account). Only a matching password
+    // proves it is the same person retrying.
+    if (!(await passwordMatches(password, pending.passwordHash))) {
+      return res.status(409).json({ error: 'a verification is already in progress for this email — enter the code from your inbox' });
+    }
+    pending.name = name;
+    const emailSent = await issuePendingCode(pending);
+    return res.status(201).json({ requiresVerification: true, emailSent });
+  }
+
   const passwordHash = await hashPassword(password);
-  const pending = await PendingRegistration.findOneAndUpdate(
+  // $setOnInsert: a concurrent double-register for the same email must not
+  // overwrite the first writer's password hash (unique index on email).
+  const created = await PendingRegistration.findOneAndUpdate(
     { email },
-    { name, email, passwordHash },
+    { $setOnInsert: { name, email, passwordHash } },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
-  const emailSent = await issuePendingCode(pending);
+  const emailSent = await issuePendingCode(created);
   // Email down: the pending (with its fresh code hash) stays, so the user
   // can resend from the verify screen or skip once a code actually arrives.
   if (!emailSent) {
@@ -232,9 +250,13 @@ router.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'invalid email or password' });
   }
   if (user.loginLockedUntil && user.loginLockedUntil > new Date()) {
-    return res.status(429).json({ error: 'too many attempts — try again in a few minutes' });
-  }
-  if (!(await passwordMatches(password, user.passwordHash))) {
+    // The lock throttles GUESSING, not the account: check the password first
+    // so a correct password always wins. Locking before the password check
+    // let anyone DoS a known email (5 wrong tries per 15 min, forever).
+    if (!(await passwordMatches(password, user.passwordHash))) {
+      return res.status(429).json({ error: 'too many attempts — try again in a few minutes' });
+    }
+  } else if (!(await passwordMatches(password, user.passwordHash))) {
     await registerFailedLogin(user);
     return res.status(401).json({ error: 'invalid email or password' });
   }
@@ -360,6 +382,10 @@ router.post('/reset-password', async (req, res) => {
 
   user.passwordHash = await hashPassword(newPassword);
   user.emailVerified = true; // they proved mailbox ownership
+  // A reset is proof of ownership: clear any login lock so the new password
+  // works immediately (the old lock outlived the reset and locked users out).
+  user.failedLoginAttempts = 0;
+  user.loginLockedUntil = null;
   // Revoke every token issued before this reset.
   user.tokenVersion = (user.tokenVersion || 0) + 1;
   user.clearResetCode();
@@ -388,7 +414,8 @@ const profileSchema = z.object({
   // completion and weight-goal saves). Unknown keys are stripped, so a
   // tampered client can never inject a manual calorie number.
   gender: genderSchema.optional(),
-  birthDate: z.coerce.date().refine((d) => d <= new Date(Date.now() - 13 * 365.25 * 24 * 3600 * 1000), 'you must be at least 13 years old').optional(),
+  // null must mean "absent", not new Date(null) → 1970 (a silent age-56 plan).
+  birthDate: z.preprocess((v) => (v === null ? undefined : v), z.coerce.date().refine((d) => d <= new Date(Date.now() - 13 * 365.25 * 24 * 3600 * 1000), 'you must be at least 13 years old').optional()),
   heightCm: z.number().gte(100).lte(250).optional(),
   weightKg: z.number().gte(25).lte(350).optional(),
   targetWeightKg: z.number().gte(25).lte(350).optional(),
@@ -453,6 +480,9 @@ router.put('/profile', requireAuth.allowUnverified, async (req, res) => {
       weightKg: parsed.data.weightKg !== undefined ? parsed.data.weightKg : req.user.weightKg,
       targetWeightKg: parsed.data.targetWeightKg !== undefined ? parsed.data.targetWeightKg : req.user.targetWeightKg,
       activityLevel: parsed.data.activityLevel !== undefined ? parsed.data.activityLevel : req.user.activityLevel,
+      // The stored plan must honor the stored pace — without this the server
+      // silently planned at 'steady' while the profile said otherwise.
+      pace: parsed.data.goalPace !== undefined ? parsed.data.goalPace : req.user.goalPace,
     };
     try {
       const plan = buildNutritionPlan(candidate);

@@ -30,11 +30,12 @@ const KCAL_PER_KG = 7700;
 // pace is optional (defaults to steady) so old callers keep working.
 const planInputSchema = z.object({
   gender: z.enum(GENDERS),
-  birthDate: z.coerce
+  // null must mean "absent", not new Date(null) → 1970 (a silent age-56 plan).
+  birthDate: z.preprocess((v) => (v === null ? undefined : v), z.coerce
     .date()
     .refine((d) => !Number.isNaN(d.getTime()), 'birthDate is invalid')
     .refine((d) => d <= new Date(Date.now() - 13 * 365.25 * 24 * 3600 * 1000), 'you must be at least 13 years old')
-    .refine((d) => d >= new Date(Date.now() - 100 * 365.25 * 24 * 3600 * 1000), 'birthDate is out of range'),
+    .refine((d) => d >= new Date(Date.now() - 100 * 365.25 * 24 * 3600 * 1000), 'birthDate is out of range')),
   heightCm: z.number().gte(100).lte(250),
   weightKg: z.number().gte(25).lte(350),
   targetWeightKg: z.number().gte(25).lte(350),

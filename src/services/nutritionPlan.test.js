@@ -23,6 +23,16 @@ describe('nutritionPlan service — completeness gate', () => {
   it('missingPlanFields names every absent field', () => {
     assert.deepEqual(missingPlanFields({ gender: 'male' }).sort(), ['activityLevel', 'birthDate', 'heightCm', 'targetWeightKg', 'weightKg'].sort());
   });
+  it('null birthDate counts as missing, never coerced to 1970', () => {
+    assert.ok(missingPlanFields({ gender: 'male', birthDate: null }).includes('birthDate'));
+    try {
+      buildNutritionPlan({ gender: 'female', birthDate: null, heightCm: 150, weightKg: 50, targetWeightKg: 45, activityLevel: 'light' });
+      assert.fail('should throw');
+    } catch (e) {
+      assert.equal(e.status, 400);
+      assert.ok(e.missing.includes('birthDate'));
+    }
+  });
 });
 
 describe('nutritionPlan service — medical safety', () => {

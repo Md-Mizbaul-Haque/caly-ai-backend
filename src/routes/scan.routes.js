@@ -27,6 +27,16 @@ async function chargeScanQuota(userId, UserModel = User) {
   return user.scanCountToday;
 }
 
+// Gives back one charge when the paid call FAILED (provider down, quota,
+// timeout): a user must not burn their daily budget on our outages.
+async function refundScanQuota(userId, UserModel = User) {
+  const dayKey = new Date().toISOString().slice(0, 10);
+  await UserModel.updateOne(
+    { _id: userId, scanDayKey: dayKey, scanCountToday: { $gt: 0 } },
+    { $inc: { scanCountToday: -1 } }
+  );
+}
+
 router.use((req, res, next) => {
   if (mongoose.connection.readyState !== 1) {
     return res.status(503).json({ error: 'database unavailable' });
@@ -209,6 +219,9 @@ router.post('/', upload.single('image'), async (req, res) => {
     }
     res.json({ items: parsed.data.items });
   } catch (e) {
+    // Our failure, not theirs: give the quota back (a 422 "no food" keeps
+    // the charge — the paid vision call did run).
+    await refundScanQuota(req.user.id).catch(() => {});
     if (isQuotaError(e)) {
       console.warn(`[scan ${req.reqId || '-'}] quota exhausted: ${e.message}`);
       return res.status(429).json({ error: 'daily scan limit reached — please try again tomorrow' });
@@ -322,11 +335,17 @@ router.post('/image', upload.single('image'), async (req, res) => {
   if (!cloudinaryStatus().configured) {
     return res.status(503).json({ error: 'photo storage is temporarily unavailable — saving without a photo' });
   }
+  // Same daily budget as scans: an unmetered upload endpoint let one account
+  // burn Cloudinary credits, defeating the scan quota's cost guard.
+  if ((await chargeScanQuota(req.user.id)) > SCAN_DAILY_LIMIT) {
+    return res.status(429).json({ error: 'daily photo limit reached — please try again tomorrow' });
+  }
   try {
     const result = await uploadBuffer(req.file.buffer);
     if (!result?.secure_url) throw new Error('upload returned no URL');
     res.json({ imageUrl: result.secure_url });
   } catch (e) {
+    await refundScanQuota(req.user.id).catch(() => {});
     console.error('photo upload error:', e.message);
     res.status(502).json({ error: 'could not store the photo — saving without it' });
   }
@@ -336,4 +355,5 @@ module.exports = router;
 module.exports.LABEL_SCHEMA = LABEL_SCHEMA;
 module.exports.SCAN_DAILY_LIMIT = SCAN_DAILY_LIMIT;
 module.exports.chargeScanQuota = chargeScanQuota;
+module.exports.refundScanQuota = refundScanQuota;
 module.exports.scanHelpers = { toNum, servingGrams, isImageBuffer, isQuotaError, lookupOffProduct };

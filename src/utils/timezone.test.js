@@ -64,6 +64,21 @@ describe('dayBounds (calendar day in the user zone, as UTC instants)', () => {
     assert.equal(dayBounds('2026-13-45', 'Asia/Dhaka'), null);
     assert.deepEqual(dayBounds('2026-10-09', 'Nope'), dayBounds('2026-10-09', 'UTC'));
   });
+  it('Santiago spring-forward: day starts at the real local midnight, not 23:00 the day before', () => {
+    // 2026-09-06 00:00 CLT (-04:00) == 04:00Z. A naive offset guess landed on
+    // 03:00Z == Sep 5 23:00 local, shifting the whole day back an hour.
+    const b = dayBounds('2026-09-06', 'America/Santiago');
+    assert.equal(b.start.toISOString(), '2026-09-06T04:00:00.000Z');
+    assert.equal(zonedDateKey(b.start, 'America/Santiago'), '2026-09-06');
+    assert.equal(zonedDateKey(new Date(b.start.getTime() - 1), 'America/Santiago'), '2026-09-05');
+  });
+  it('Beirut fall-back at midnight: day still starts at local 00:00', () => {
+    // 2026-10-25 00:00 EET (+02:00) == 2026-10-24T22:00Z.
+    const b = dayBounds('2026-10-25', 'Asia/Beirut');
+    assert.equal(b.start.toISOString(), '2026-10-24T22:00:00.000Z');
+    assert.equal(zonedDateKey(b.start, 'Asia/Beirut'), '2026-10-25');
+    assert.equal(zonedDateKey(new Date(b.start.getTime() - 1), 'Asia/Beirut'), '2026-10-24');
+  });
 });
 
 describe('zonedDateKey + localDayWindow', () => {
