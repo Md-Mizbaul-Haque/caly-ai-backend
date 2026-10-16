@@ -561,6 +561,24 @@ function toLbs(kg) {
   return Math.round(Number(kg) * KG_TO_LBS * 10) / 10;
 }
 
+// Merges an onboarding-completion body over the stored profile. Extracted from
+// the route so the exact merge the server plans from is unit-tested: a stored
+// null (a brand-new user's goalPace) is a real state that must flow through —
+// the planner treats null pace as "unchosen" and defaults to steady.
+function onboardingCandidate(stored, data) {
+  return {
+    gender: data.gender !== undefined ? data.gender : stored.gender,
+    birthDate: data.birthDate !== undefined ? data.birthDate : stored.birthDate,
+    heightCm: data.heightCm !== undefined ? data.heightCm : stored.heightCm,
+    weightKg: data.weightKg !== undefined ? data.weightKg : stored.weightKg,
+    targetWeightKg: data.targetWeightKg !== undefined ? data.targetWeightKg : stored.targetWeightKg,
+    activityLevel: data.activityLevel !== undefined ? data.activityLevel : stored.activityLevel,
+    // The stored plan must honor the stored pace — without this the server
+    // silently planned at 'steady' while the profile said otherwise.
+    pace: data.goalPace !== undefined ? data.goalPace : stored.goalPace,
+  };
+}
+
 // Onboarding completion seeds the tracking collections from the profile the
 // user just finished: first weigh-in + goal weight. Never overwrites —
 // existing rows win (e.g. user logged during onboarding, or is retrying
@@ -599,17 +617,7 @@ router.put('/profile', requireAuth.allowUnverified, async (req, res) => {
   }
   if (parsed.data.onboardingCompleted === true) {
     const { buildNutritionPlan, missingPlanFields } = require('../services/nutritionPlan');
-    const candidate = {
-      gender: parsed.data.gender !== undefined ? parsed.data.gender : req.user.gender,
-      birthDate: parsed.data.birthDate !== undefined ? parsed.data.birthDate : req.user.birthDate,
-      heightCm: parsed.data.heightCm !== undefined ? parsed.data.heightCm : req.user.heightCm,
-      weightKg: parsed.data.weightKg !== undefined ? parsed.data.weightKg : req.user.weightKg,
-      targetWeightKg: parsed.data.targetWeightKg !== undefined ? parsed.data.targetWeightKg : req.user.targetWeightKg,
-      activityLevel: parsed.data.activityLevel !== undefined ? parsed.data.activityLevel : req.user.activityLevel,
-      // The stored plan must honor the stored pace — without this the server
-      // silently planned at 'steady' while the profile said otherwise.
-      pace: parsed.data.goalPace !== undefined ? parsed.data.goalPace : req.user.goalPace,
-    };
+    const candidate = onboardingCandidate(req.user, parsed.data);
     try {
       const plan = buildNutritionPlan(candidate);
       Object.assign(req.user, parsed.data, { dailyGoalKcal: plan.dailyGoalKcal, onboardingCompleted: true });
@@ -641,6 +649,7 @@ router.put('/profile', requireAuth.allowUnverified, async (req, res) => {
 
 module.exports = router;
 module.exports.profileSchema = profileSchema;
+module.exports.onboardingCandidate = onboardingCandidate;
 module.exports.skipSchema = skipSchema;
 module.exports.checkCode = checkCode;
 module.exports.keepPendingOnEmailFailure = keepPendingOnEmailFailure;

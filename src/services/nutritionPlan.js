@@ -40,7 +40,11 @@ const planInputSchema = z.object({
   weightKg: z.number().gte(25).lte(350),
   targetWeightKg: z.number().gte(25).lte(350),
   activityLevel: z.enum(ACTIVITIES),
-  pace: z.enum(PACES).optional(),
+  // null must mean "absent", not a failed enum: goalPace defaults to null on a
+  // new user, and `.optional()` accepts undefined ONLY. Passing that null
+  // straight through made every first onboarding save fail with 400 while the
+  // /api/plan/calculate preview (which omits pace) rendered fine.
+  pace: z.preprocess((v) => (v === null ? undefined : v), z.enum(PACES).optional()),
 });
 
 const REQUIRED_FIELDS = ['gender', 'birthDate', 'heightCm', 'weightKg', 'targetWeightKg', 'activityLevel'];

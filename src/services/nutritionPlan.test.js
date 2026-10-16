@@ -20,6 +20,14 @@ describe('nutritionPlan service — completeness gate', () => {
       assert.equal(e.status, 400);
     }
   });
+  it('treats a null pace as unchosen instead of an invalid enum', () => {
+    // Regression: a brand-new user's stored goalPace is null, onboarding merged
+    // it straight into pace, and z.enum().optional() rejects null — so the very
+    // first plan save 400'd while /api/plan/calculate (no pace key) rendered.
+    const p = buildNutritionPlan({ gender: 'female', birthDate: '1990-01-01', heightCm: 165, weightKg: 70, targetWeightKg: 60, activityLevel: 'light', pace: null });
+    assert.equal(p.pace, 'steady');
+    assert.ok(p.dailyGoalKcal >= 1200);
+  });
   it('missingPlanFields names every absent field', () => {
     assert.deepEqual(missingPlanFields({ gender: 'male' }).sort(), ['activityLevel', 'birthDate', 'heightCm', 'targetWeightKg', 'weightKg'].sort());
   });
