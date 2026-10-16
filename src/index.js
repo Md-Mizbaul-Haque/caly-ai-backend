@@ -38,7 +38,7 @@ async function main() {
     console.error(`SMTP config: ${problem}`);
   }
   if (!process.env.SMTP_HOST) {
-    console.error('SMTP_HOST not set — verification emails will be console-logged, NOT sent. Set SMTP_HOST/PORT/USER/PASS on the host.');
+    console.log('SMTP_HOST not set — running in no-SMTP auto-verify mode: accounts verify without email codes. Set SMTP_HOST/PORT/USER/PASS on the host to restore code verification.');
   } else {
     getTransporter().verify().then(
       () => console.log('SMTP relay verified — verification emails can send'),

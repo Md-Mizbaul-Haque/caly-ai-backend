@@ -79,7 +79,7 @@ router.get('/', async (req, res) => {
   const from = dayBound(req.query.from, false, tz);
   const to = dayBound(req.query.to, true, tz);
   const loggedAt = from && to && from <= to ? { loggedAt: { $gte: from, $lte: to } } : {};
-  const weights = await Weight.find({ userId: req.user.id, ...loggedAt }).sort({ loggedAt: 1 });
+  const weights = await Weight.find({ userId: req.user.id, ...loggedAt }).sort({ loggedAt: 1 }).lean();
   res.json({ weights });
 });
 
@@ -120,7 +120,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 router.get('/goal', async (req, res) => {
-  const goal = await WeightGoal.findOne({ userId: req.user.id });
+  const goal = await WeightGoal.findOne({ userId: req.user.id }).lean();
   res.json({ goal: goal ? goal.value : null });
 });
 

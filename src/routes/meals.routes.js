@@ -108,7 +108,7 @@ router.get('/', async (req, res) => {
     }
     filter.mealType = req.query.mealType;
   }
-  const meals = await Meal.find(filter).sort({ loggedAt: 1 });
+  const meals = await Meal.find(filter).sort({ loggedAt: 1 }).lean();
   res.json({ meals });
 });
 

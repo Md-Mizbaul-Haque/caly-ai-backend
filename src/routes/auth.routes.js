@@ -61,7 +61,18 @@ function invalid(res, details) {
   return res.status(400).json({ error: 'invalid request', details });
 }
 
-// Saves the code, then tries email. Returns true when the email went out;
+// Fire-and-forget mail: the code hash is already persisted, so the request
+// must not await SMTP (Render->Gmail black-holes 10-30s, blowing the client's
+// 15-30s timeout). Returns true optimistically; failures land in /health via
+// lastMailError and the user can resend. shortcut: emailSent is optimistic,
+// upgrade to awaited send with 4s race if false-negatives matter.
+function sendInBackground(promise, email) {
+  promise.catch((e) => {
+    console.warn(`[auth] email send failed to=${email} class=${classifyMailError(e)} code=${e.code || '-'}: ${e.message}`);
+  });
+}
+
+// Saves the code, then queues email in background. Returns true immediately;
 // a down SMTP must never fail (or hang past mailer timeouts) the request.
 async function issueVerifyCode(user) {
   const code = generateCode();
@@ -69,16 +80,14 @@ async function issueVerifyCode(user) {
   user.verifyCodeExpiresAt = codeExpiry();
   user.verifyCodeAttempts = 0;
   await user.save();
-  try {
-    await sendMail({
+  sendInBackground(
+    sendMail({
       to: user.email,
       ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
-    });
-    return true;
-  } catch (e) {
-    console.warn(`[auth] email send failed to=${user.email} class=${classifyMailError(e)} code=${e.code || '-'}: ${e.message}`);
-    return false;
-  }
+    }),
+    user.email
+  );
+  return true;
 }
 
 async function issuePendingCode(pending) {
@@ -87,16 +96,14 @@ async function issuePendingCode(pending) {
   pending.codeExpiresAt = codeExpiry();
   pending.codeAttempts = 0;
   await pending.save();
-  try {
-    await sendMail({
+  sendInBackground(
+    sendMail({
       to: pending.email,
       ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
-    });
-    return true;
-  } catch (e) {
-    console.warn(`[auth] email send failed to=${pending.email} class=${classifyMailError(e)} code=${e.code || '-'}: ${e.message}`);
-    return false;
-  }
+    }),
+    pending.email
+  );
+  return true;
 }
 
 async function issueResetCode(user) {
@@ -105,16 +112,14 @@ async function issueResetCode(user) {
   user.resetCodeExpiresAt = codeExpiry();
   user.resetCodeAttempts = 0;
   await user.save();
-  try {
-    await sendMail({
+  sendInBackground(
+    sendMail({
       to: user.email,
       ...passwordResetEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
-    });
-    return true;
-  } catch (e) {
-    console.warn(`[auth] email send failed to=${user.email} class=${classifyMailError(e)} code=${e.code || '-'}: ${e.message}`);
-    return false;
-  }
+    }),
+    user.email
+  );
+  return true;
 }
 
 // Checks a 6-digit code against a doc whose code fields are named
@@ -159,6 +164,26 @@ function markVerified(user) {
   user.clearVerifyCode();
 }
 
+// No-SMTP mode: the relay is removed (SMTP_HOST unset), so mailbox ownership
+// cannot be proven by code. Accounts verify automatically instead of hanging
+// on an undeliverable send. TEMPORARY — the moment SMTP_HOST is set again
+// every branch below goes dormant and code verification resumes.
+// shortcut: zero email-ownership proof in this mode; do not collect sensitive
+// data or rely on reset-by-email until SMTP returns.
+function isSmtpConfigured() {
+  return !!process.env.SMTP_HOST;
+}
+
+// The verify-email success path minus the code check: creates the verified
+// User row from a pending registration (same steps, same shape).
+async function materializeVerifiedUser(pending) {
+  const user = await User.create({ name: pending.name, email: pending.email, passwordHash: pending.passwordHash });
+  markVerified(user);
+  await user.save();
+  await PendingRegistration.deleteOne({ _id: pending._id });
+  return user;
+}
+
 // Email-failure path for POST /register: the pending row (which already
 // holds a fresh code hash from issuePendingCode) is left untouched so
 // resend-code / skip-verification / verify-email keep working. Never creates
@@ -196,6 +221,11 @@ router.post('/register', async (req, res) => {
     existing.name = name;
     // Credentials re-confirmed: any token minted for the old (unverified) row dies.
     existing.tokenVersion = (existing.tokenVersion || 0) + 1;
+    if (!isSmtpConfigured()) {
+      markVerified(existing);
+      await existing.save();
+      return res.status(201).json({ token: signToken(existing), user: existing, autoVerified: true });
+    }
     const emailSent = await issueVerifyCode(existing);
     return res.status(201).json({ requiresVerification: true, emailSent });
   }
@@ -207,9 +237,23 @@ router.post('/register', async (req, res) => {
     // the stranger's password opens the account). Only a matching password
     // proves it is the same person retrying.
     if (!(await passwordMatches(password, pending.passwordHash))) {
-      return res.status(409).json({ error: 'a verification is already in progress for this email — enter the code from your inbox' });
+      return res.status(409).json({ error: isSmtpConfigured()
+        ? 'a verification is already in progress for this email — enter the code from your inbox'
+        : 'an account with this email already exists — sign in with your password' });
     }
     pending.name = name;
+    if (!isSmtpConfigured()) {
+      try {
+        const user = await materializeVerifiedUser(pending);
+        return res.status(201).json({ token: signToken(user), user, autoVerified: true });
+      } catch (e) {
+        // Double-submit race: the twin request already created the user.
+        if (e && e.code === 11000) {
+          return res.status(409).json({ error: 'email already verified — please log in' });
+        }
+        throw e;
+      }
+    }
     const emailSent = await issuePendingCode(pending);
     return res.status(201).json({ requiresVerification: true, emailSent });
   }
@@ -222,6 +266,17 @@ router.post('/register', async (req, res) => {
     { $setOnInsert: { name, email, passwordHash } },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
+  if (!isSmtpConfigured()) {
+    try {
+      const user = await materializeVerifiedUser(created);
+      return res.status(201).json({ token: signToken(user), user, autoVerified: true });
+    } catch (e) {
+      if (e && e.code === 11000) {
+        return res.status(409).json({ error: 'email already verified — please log in' });
+      }
+      throw e;
+    }
+  }
   const emailSent = await issuePendingCode(created);
   // Email down: the pending (with its fresh code hash) stays, so the user
   // can resend from the verify screen or skip once a code actually arrives.
@@ -244,6 +299,17 @@ router.post('/login', async (req, res) => {
     // email on wrong password — no enumeration.
     const pending = await PendingRegistration.findOne({ email });
     if (pending && (await passwordMatches(password, pending.passwordHash))) {
+      if (!isSmtpConfigured()) {
+        try {
+          const autoUser = await materializeVerifiedUser(pending);
+          return res.json({ token: signToken(autoUser), user: autoUser, autoVerified: true });
+        } catch (e) {
+          if (e && e.code === 11000) {
+            return res.status(409).json({ error: 'email already verified — please log in' });
+          }
+          throw e;
+        }
+      }
       const emailSent = await issuePendingCode(pending);
       return res.status(403).json({ error: 'email not verified — a new code has been sent', needsVerification: true, emailSent });
     }
@@ -261,6 +327,15 @@ router.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'invalid email or password' });
   }
   if (!user.emailVerified) {
+    if (!isSmtpConfigured()) {
+      markVerified(user);
+      if (user.failedLoginAttempts || user.loginLockedUntil) {
+        user.failedLoginAttempts = 0;
+        user.loginLockedUntil = null;
+      }
+      await user.save();
+      return res.json({ token: signToken(user), user, autoVerified: true });
+    }
     const emailSent = await issueVerifyCode(user);
     return res.status(403).json({ error: 'email not verified — a new code has been sent', needsVerification: true, emailSent });
   }
@@ -280,6 +355,33 @@ router.post('/verify-email', async (req, res) => {
   const parsed = verifySchema.safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
   const { email, code } = parsed.data;
+
+  // No-SMTP mode: the code cannot be delivered, so checking it would lock
+  // everyone out. Any well-formed code completes verification.
+  if (!isSmtpConfigured()) {
+    const pendingAuto = await PendingRegistration.findOne({ email });
+    if (pendingAuto) {
+      try {
+        const autoUser = await materializeVerifiedUser(pendingAuto);
+        return res.json({ token: signToken(autoUser), user: autoUser, autoVerified: true });
+      } catch (e) {
+        if (e && e.code === 11000) {
+          return res.status(409).json({ error: 'email already verified — please log in' });
+        }
+        throw e;
+      }
+    }
+    const existingAuto = await User.findOne({ email });
+    if (existingAuto && !existingAuto.emailVerified) {
+      markVerified(existingAuto);
+      await existingAuto.save();
+      return res.json({ token: signToken(existingAuto), user: existingAuto, autoVerified: true });
+    }
+    if (existingAuto && existingAuto.emailVerified) {
+      return res.status(409).json({ error: 'email already verified — please log in' });
+    }
+    return res.status(400).json({ error: 'verification code is invalid or expired' });
+  }
 
   const pending = await PendingRegistration.findOne({ email });
   if (pending) {
@@ -324,6 +426,28 @@ router.post('/resend-code', async (req, res) => {
   const parsed = z.object({ email: emailSchema }).safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
   const { email } = parsed.data;
+  // No-SMTP mode: nobody is waiting on a code — verify on the spot and hand
+  // back a session so "I didn't get a code" signs the user straight in.
+  if (!isSmtpConfigured()) {
+    const pendingAuto = await PendingRegistration.findOne({ email });
+    if (pendingAuto) {
+      try {
+        const autoUser = await materializeVerifiedUser(pendingAuto);
+        return res.json({ ok: true, emailSent: true, autoVerified: true, token: signToken(autoUser), user: autoUser });
+      } catch (e) {
+        if (e && e.code === 11000) {
+          return res.status(409).json({ error: 'email already verified — please log in' });
+        }
+        throw e;
+      }
+    }
+    const existingAuto = await User.findOne({ email });
+    if (existingAuto && !existingAuto.emailVerified) {
+      markVerified(existingAuto);
+      await existingAuto.save();
+      return res.json({ ok: true, emailSent: true, autoVerified: true, token: signToken(existingAuto), user: existingAuto });
+    }
+  }
   const pending = await PendingRegistration.findOne({ email });
   if (pending) return res.json({ ok: true, emailSent: await issuePendingCode(pending) });
   // Existing unverified account (skip-verification): re-issue onto the User row.
@@ -357,7 +481,9 @@ router.post('/forgot-password', async (req, res) => {
   const parsed = z.object({ email: emailSchema }).safeParse(req.body);
   if (!parsed.success) return invalid(res, parsed.error.issues);
   const user = await User.findOne({ email: parsed.data.email });
-  const emailSent = user ? await issueResetCode(user) : true;
+  // No-SMTP mode: no code can be delivered, so report honestly instead of
+  // minting an undeliverable code. Reset-by-email returns with SMTP.
+  const emailSent = !isSmtpConfigured() ? false : user ? await issueResetCode(user) : true;
   res.json({ ok: true, emailSent });
 });
 
@@ -488,9 +614,14 @@ router.put('/profile', requireAuth.allowUnverified, async (req, res) => {
       const plan = buildNutritionPlan(candidate);
       Object.assign(req.user, parsed.data, { dailyGoalKcal: plan.dailyGoalKcal, onboardingCompleted: true });
       await req.user.save();
-      // First weigh-in + goal for the Progress screen, from the profile the
-      // user just completed. Retry-safe (seed skips when rows exist).
-      await seedTrackingFromOnboarding(req.user);
+      // First weigh-in + goal for the Progress screen. Best-effort: the plan
+      // is already persisted above, so a seed throw (DB race) must not turn
+      // this success into a 500 — retrying would then look like a failure.
+      try {
+        await seedTrackingFromOnboarding(req.user);
+      } catch (seedErr) {
+        console.warn(`[auth] seed tracking failed for user=${req.user.id}: ${seedErr.message}`);
+      }
       return res.json({ user: req.user, plan });
     } catch (e) {
       if (e.status === 400) {
@@ -515,5 +646,6 @@ module.exports.checkCode = checkCode;
 module.exports.keepPendingOnEmailFailure = keepPendingOnEmailFailure;
 module.exports.registerFailedLogin = registerFailedLogin;
 module.exports.markVerified = markVerified;
+module.exports.isSmtpConfigured = isSmtpConfigured;
 module.exports.toLbs = toLbs;
 module.exports.seedTrackingFromOnboarding = seedTrackingFromOnboarding;

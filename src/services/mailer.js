@@ -6,7 +6,7 @@ const testInboxEnabled = process.env.CALY_TEST_INBOX === '1';
 const sentEmails = [];
 
 let transporter = null;
-const SMTP_TIMEOUT_MS = 10000; // Render -> Gmail can black-hole; never hang a request past this per phase
+const SMTP_TIMEOUT_MS = 5000; // Render -> Gmail can black-hole; never hang boot/verify past this per phase
 
 function buildSmtpOptions() {
   return {
