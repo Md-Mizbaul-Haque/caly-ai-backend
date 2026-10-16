@@ -22,6 +22,8 @@ const PACES = ['slow', 'steady', 'fast'];
 const PACE_DEFICIT = { slow: 250, steady: 500, fast: 750 };
 const PACE_SURPLUS = { slow: 250, steady: 400, fast: 500 };
 const PACE_RATE_KG_WK = { slow: 0.25, steady: 0.5, fast: 0.75 };
+// 7700 kcal ≈ 1 kg body mass — the constant behind every ETA.
+const KCAL_PER_KG = 7700;
 
 // Full inputs required to create a plan. All optional on partial profile
 // writes, but ALL required here — plan is created ONLY after all info exists.
@@ -148,7 +150,19 @@ function buildNutritionPlan(input, now = new Date()) {
   warnings.push('Dietary guidance is for informational purposes only and is not medical advice. Consult your healthcare provider before making changes, especially with existing health conditions.');
 
   const weeklyRateKg = PACE_RATE_KG_WK[pace] ?? 0.5;
-  const etaWeeks = goal === 'Maintain Weight' ? 0 : Math.ceil(Math.abs(targetWeightKg - weightKg) / weeklyRateKg);
+  // ETA from the EFFECTIVE rate the plan actually delivers: when a floor caps
+  // the deficit (teen, BMR/sex floor, underweight→maintenance) the pace table
+  // would promise a speed this plan never prescribes. No rate → no ETA (null).
+  let etaWeeks;
+  if (goal === 'Maintain Weight') {
+    etaWeeks = 0;
+  } else {
+    const dailyDelta = goal === 'Lose Weight' ? maintenance - dailyGoalKcal : dailyGoalKcal - maintenance;
+    const effectiveWeeklyKg = (dailyDelta * 7) / KCAL_PER_KG;
+    etaWeeks = effectiveWeeklyKg > 0
+      ? Math.ceil(Math.abs(targetWeightKg - weightKg) / effectiveWeeklyKg)
+      : null;
+  }
 
   return { bmr, maintenance, dailyGoalKcal, proteinG, fatG, carbsG, goal, bmi, age, warnings, pace, weeklyRateKg, etaWeeks };
 }

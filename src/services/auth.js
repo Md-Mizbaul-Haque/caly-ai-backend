@@ -9,8 +9,9 @@ const LOGIN_LOCK_MS = 15 * 60 * 1000;
 
 function requireJwtSecret() {
   const secret = process.env.JWT_SECRET;
-  if (!secret || secret.length < 20) {
-    throw new Error('JWT_SECRET must be set to a long random string — see .env.example');
+  // Same bar as the startup gate in index.js — one rule, stated twice.
+  if (!secret || secret.length < 32) {
+    throw new Error('JWT_SECRET must be set to a random string of at least 32 characters — see .env.example');
   }
   return secret;
 }

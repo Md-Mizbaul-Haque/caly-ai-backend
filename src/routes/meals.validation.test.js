@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { mealBodySchema } = require('./meals.routes');
+const { mealBodySchema, rangeTooLarge, MAX_RANGE_DAYS } = require('./meals.routes');
 const Meal = require('../models/Meal');
 
 describe('mealBodySchema', () => {
@@ -28,6 +28,21 @@ describe('mealBodySchema', () => {
   it('caps macros so one row cannot skew averages', () => {
     assert.equal(mealBodySchema.safeParse({ name: 'X', kcal: 100, protein: 99999 }).success, false);
     assert.equal(mealBodySchema.safeParse({ name: 'X', kcal: 100, protein: 25 }).success, true);
+  });
+});
+
+describe('GET /api/meals range cap', () => {
+  it('allows the app’s 365-day window', () => {
+    const to = Date.now();
+    const from = to - 366 * 24 * 3600 * 1000; // 365 days + end-of-day padding
+    assert.equal(rangeTooLarge(from, to), false);
+  });
+  it('rejects a lifetime query', () => {
+    assert.equal(rangeTooLarge(Date.UTC(1970, 0, 1), Date.now()), true);
+  });
+  it('keeps a sane bound relative to what the app asks for', () => {
+    assert.ok(MAX_RANGE_DAYS >= 366);
+    assert.ok(MAX_RANGE_DAYS <= 730);
   });
 });
 

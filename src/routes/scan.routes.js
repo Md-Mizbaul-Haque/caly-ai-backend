@@ -3,8 +3,29 @@ const mongoose = require('mongoose');
 const multer = require('multer');
 const { z } = require('zod');
 const { requireAuth } = require('../middleware/auth');
+const User = require('../models/User');
 
 const router = express.Router();
+
+// Daily paid-vision quota per user. The global IP buckets alone let one
+// account drain the shared provider quota; this is the cost guard.
+const SCAN_DAILY_LIMIT = Math.max(parseInt(process.env.SCAN_DAILY_LIMIT, 10) || 50, 1);
+
+// Charges one scan against today's (UTC) quota and returns the new count.
+// Read-modify-write is deliberate: a rare parallel-scan race may undercount
+// by a request or two — fine for a cost guard, never a security boundary.
+async function chargeScanQuota(userId, UserModel = User) {
+  const dayKey = new Date().toISOString().slice(0, 10);
+  const user = await UserModel.findById(userId).select('scanDayKey scanCountToday');
+  if (!user) return SCAN_DAILY_LIMIT + 1;
+  if (user.scanDayKey !== dayKey) {
+    user.scanDayKey = dayKey;
+    user.scanCountToday = 0;
+  }
+  user.scanCountToday = (user.scanCountToday || 0) + 1;
+  await user.save();
+  return user.scanCountToday;
+}
 
 router.use((req, res, next) => {
   if (mongoose.connection.readyState !== 1) {
@@ -161,6 +182,10 @@ router.post('/', upload.single('image'), async (req, res) => {
   if (!isImageBuffer(req.file.buffer)) {
     return res.status(400).json({ error: 'only photo files are accepted' });
   }
+  // Quota check last: rejected requests above must not consume quota.
+  if ((await chargeScanQuota(req.user.id)) > SCAN_DAILY_LIMIT) {
+    return res.status(429).json({ error: 'daily scan limit reached — please try again tomorrow' });
+  }
   try {
     const b64 = req.file.buffer.toString('base64');
     const completion = await aiClient.chat.completions.create({
@@ -309,4 +334,6 @@ router.post('/image', upload.single('image'), async (req, res) => {
 
 module.exports = router;
 module.exports.LABEL_SCHEMA = LABEL_SCHEMA;
+module.exports.SCAN_DAILY_LIMIT = SCAN_DAILY_LIMIT;
+module.exports.chargeScanQuota = chargeScanQuota;
 module.exports.scanHelpers = { toNum, servingGrams, isImageBuffer, isQuotaError, lookupOffProduct };

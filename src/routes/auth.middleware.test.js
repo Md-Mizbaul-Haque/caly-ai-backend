@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 // Dummy secret BEFORE requiring services: sign/verify read it lazily, and
 // these tests must never depend on a real .env value.
-process.env.JWT_SECRET = 'test-only-secret-1234567890';
+process.env.JWT_SECRET = 'test-only-secret-1234567890-abcdefg';
 const User = require('../models/User');
 const { signToken } = require('../services/auth');
 const { requireAuth } = require('../middleware/auth');

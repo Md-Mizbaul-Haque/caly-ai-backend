@@ -38,6 +38,10 @@ const userSchema = new mongoose.Schema(
     loginLockedUntil: { type: Date, default: null },
     // Bumped on password reset / logout to revoke every issued JWT.
     tokenVersion: { type: Number, default: 0 },
+    // Per-user daily scan cap (UTC day): the shared IP buckets can't stop one
+    // account from burning the whole paid vision quota.
+    scanDayKey: { type: String, default: null },
+    scanCountToday: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
@@ -57,6 +61,8 @@ userSchema.set('toJSON', {
     delete ret.failedLoginAttempts;
     delete ret.loginLockedUntil;
     delete ret.tokenVersion;
+    delete ret.scanDayKey;
+    delete ret.scanCountToday;
     return ret;
   },
 });

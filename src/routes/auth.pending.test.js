@@ -3,10 +3,10 @@ const assert = require('node:assert/strict');
 
 // Dummy secret BEFORE requiring services/auth: hashCode/codeExpiry read it
 // lazily, and these tests must never depend on a real .env value.
-process.env.JWT_SECRET = 'test-only-secret-1234567890';
+process.env.JWT_SECRET = 'test-only-secret-1234567890-abcdefg';
 const PendingRegistration = require('../models/PendingRegistration');
-const { skipSchema, checkCode, registerFailedLogin } = require('./auth.routes');
-const { generateCode, hashCode, codesMatch, MAX_RESET_ATTEMPTS, MAX_LOGIN_ATTEMPTS, LOGIN_LOCK_MS } = require('../services/auth');
+const { skipSchema, checkCode, registerFailedLogin, markVerified, keepPendingOnEmailFailure } = require('./auth.routes');
+const { generateCode, hashCode, codesMatch, MAX_RESET_ATTEMPTS, MAX_LOGIN_ATTEMPTS, LOGIN_LOCK_MS, signToken, verifyToken } = require('../services/auth');
 
 describe('skipSchema', () => {
   it('accepts a valid email', () => {
@@ -106,6 +106,33 @@ describe('checkCode (shared by pending + unverified-user rows)', () => {
   });
 });
 
+describe('keepPendingOnEmailFailure (register when SMTP is down)', () => {
+  function fakePendingStore(existing = { email: 'a@b.co' }) {
+    const calls = [];
+    return {
+      calls,
+      async findOne(query) { calls.push(['findOne', query]); return existing; },
+      async deleteOne(query) { calls.push(['deleteOne', query]); return { deletedCount: 1 }; },
+    };
+  }
+  function throwingUser() {
+    return { async create() { throw new Error('User.create must not run on email failure'); } };
+  }
+  it('keeps the pending row and reports emailSent:false', async () => {
+    const Pending = fakePendingStore();
+    const payload = await keepPendingOnEmailFailure({ PendingRegistration: Pending, User: throwingUser() }, 'a@b.co');
+    assert.equal(payload.requiresVerification, true);
+    assert.equal(payload.emailSent, false);
+    assert.ok(Pending.calls.some(([op]) => op === 'findOne'));
+    assert.ok(!Pending.calls.some(([op]) => op === 'deleteOne'), 'pending must survive so resend/skip/verify keep working');
+  });
+  it('reports pendingKept:false when the row is gone', async () => {
+    const payload = await keepPendingOnEmailFailure({ PendingRegistration: fakePendingStore(null), User: throwingUser() }, 'a@b.co');
+    assert.equal(payload.emailSent, false);
+    assert.equal(payload.pendingKept, false);
+  });
+});
+
 describe('registerFailedLogin (per-account throttle)', () => {
   it('counts attempts below the cap without locking', async () => {
     const user = { failedLoginAttempts: 0, loginLockedUntil: null, saves: 0, async save() { this.saves += 1; } };
@@ -119,5 +146,40 @@ describe('registerFailedLogin (per-account throttle)', () => {
     assert.equal(user.failedLoginAttempts, 0);
     const msLeft = user.loginLockedUntil.getTime() - Date.now();
     assert.ok(msLeft > LOGIN_LOCK_MS - 5000 && msLeft <= LOGIN_LOCK_MS);
+  });
+});
+
+function fakeUnverifiedUser() {
+  return {
+    emailVerified: false,
+    tokenVersion: 0,
+    verifyCodeHash: 'abc',
+    verifyCodeExpiresAt: new Date(),
+    verifyCodeAttempts: 2,
+    saves: 0,
+    clearVerifyCode() { this.verifyCodeHash = null; this.verifyCodeExpiresAt = null; this.verifyCodeAttempts = 0; },
+    async save() { this.saves += 1; },
+  };
+}
+
+describe('markVerified (verification kills pre-verification tokens)', () => {
+  it('marks verified, bumps tokenVersion, clears the code, and saves', async () => {
+    const user = fakeUnverifiedUser();
+    markVerified(user);
+    assert.equal(user.emailVerified, true);
+    assert.equal(user.tokenVersion, 1);
+    assert.equal(user.verifyCodeHash, null);
+    await user.save();
+    assert.equal(user.saves, 1);
+  });
+  it('invalidates a token minted while the row was unverified (skip-verification takeover)', () => {
+    const user = fakeUnverifiedUser();
+    // What the attacker holds: a real token from skip-verification, tv=0.
+    const attackerToken = signToken({ id: '64f00000000000000000000a', tokenVersion: user.tokenVersion });
+    markVerified(user);
+    // The middleware rejects when payload.tv !== user.tokenVersion — this is
+    // the exact comparison that used to let the attacker in after the victim
+    // verified the same row.
+    assert.notEqual(verifyToken(attackerToken).tv, user.tokenVersion);
   });
 });

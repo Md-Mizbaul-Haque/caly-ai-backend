@@ -94,3 +94,29 @@ describe('lookupOffProduct (upstream accounting)', () => {
     assert.equal(out.data, null);
   });
 });
+
+describe('chargeScanQuota (per-user daily scan cap)', () => {
+  const { chargeScanQuota, SCAN_DAILY_LIMIT } = require('./scan.routes');
+  const todayKey = () => new Date().toISOString().slice(0, 10);
+  const fakeModel = (user) => ({ findById: () => ({ select: async () => user }) });
+  const fakeUser = (patch) => ({ saves: 0, async save() { this.saves += 1; }, ...patch });
+
+  it('increments within the same day', async () => {
+    const user = fakeUser({ scanDayKey: todayKey(), scanCountToday: 4 });
+    assert.equal(await chargeScanQuota('u1', fakeModel(user)), 5);
+    assert.equal(user.saves, 1);
+  });
+
+  it('resets the counter on a new day', async () => {
+    const user = fakeUser({ scanDayKey: '2000-01-01', scanCountToday: 49 });
+    assert.equal(await chargeScanQuota('u1', fakeModel(user)), 1);
+  });
+
+  it('treats a missing user as over quota (defensive)', async () => {
+    assert.ok((await chargeScanQuota('ghost', fakeModel(null))) > SCAN_DAILY_LIMIT);
+  });
+
+  it('has a sane default limit', () => {
+    assert.ok(Number.isInteger(SCAN_DAILY_LIMIT) && SCAN_DAILY_LIMIT >= 1 && SCAN_DAILY_LIMIT <= 500);
+  });
+});

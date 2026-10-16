@@ -29,6 +29,10 @@ function dayBound(s, endOfDay, tz) {
   return endOfDay ? b.end : b.start;
 }
 
+function rangeTooLarge(from, to) {
+  return to - from > MAX_RANGE_DAYS * 24 * 3600 * 1000;
+}
+
 function dbDown(res) {
   if (mongoose.connection.readyState !== 1) {
     res.status(503).json({ error: 'database unavailable' });
@@ -46,6 +50,9 @@ router.use((req, res, next) => {
 router.use(requireAuth);
 
 const MEAL_TYPES = ['Breakfast', 'Lunch', 'Dinner', 'Snack'];
+// Longest window GET /api/meals serves. The app asks for 365 days; without a
+// cap a crafted from=1970 makes the server serialize a lifetime diary.
+const MAX_RANGE_DAYS = 400;
 
 router.get('/my-foods', async (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 50);
@@ -91,6 +98,9 @@ router.get('/', async (req, res) => {
   if (!from || !to || from > to) {
     return res.status(400).json({ error: 'from and to query params required as YYYY-MM-DD' });
   }
+  if (rangeTooLarge(from, to)) {
+    return res.status(400).json({ error: `range too large — max ${MAX_RANGE_DAYS} days` });
+  }
   const filter = { userId: req.user.id, loggedAt: { $gte: from, $lte: to } };
   if (req.query.mealType !== undefined) {
     if (!MEAL_TYPES.includes(req.query.mealType)) {
@@ -122,3 +132,5 @@ router.delete('/:id', async (req, res) => {
 
 module.exports = router;
 module.exports.mealBodySchema = mealBodySchema;
+module.exports.MAX_RANGE_DAYS = MAX_RANGE_DAYS;
+module.exports.rangeTooLarge = rangeTooLarge;

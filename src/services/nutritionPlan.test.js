@@ -85,8 +85,23 @@ describe('nutritionPlan service — medical safety', () => {
     assert.equal(buildNutritionPlan({ ...base, pace: 'steady' }).dailyGoalKcal - buildNutritionPlan({ ...base, pace: 'steady' }).maintenance, 400);
     assert.equal(buildNutritionPlan({ ...base, pace: 'fast' }).dailyGoalKcal - buildNutritionPlan({ ...base, pace: 'fast' }).maintenance, 500);
   });
-  it('exposes etaWeeks from pace rate', () => {
+  it('exposes etaWeeks from the effective deficit, not the pace table', () => {
     const p = buildNutritionPlan({ gender: 'male', birthDate: '1990-01-01', heightCm: 180, weightKg: 90, targetWeightKg: 80, activityLevel: 'moderate', pace: 'steady' });
-    assert.equal(p.etaWeeks, 20);
+    // 500 kcal/day = 0.4545 kg/week (7700 kcal/kg) → 10 kg needs 22 weeks
+    assert.equal(p.etaWeeks, Math.ceil(10 / ((500 * 7) / 7700)));
+  });
+  it('etaWeeks slows when a floor caps the deficit (teen fast)', () => {
+    const teen = buildNutritionPlan({ gender: 'male', birthDate: '2010-06-01', heightCm: 170, weightKg: 70, targetWeightKg: 60, activityLevel: 'moderate', pace: 'fast' });
+    const cappedDeficit = teen.maintenance - teen.dailyGoalKcal;
+    assert.equal(cappedDeficit, 300);
+    assert.equal(teen.etaWeeks, Math.ceil(10 / ((cappedDeficit * 7) / 7700)));
+    assert.ok(teen.etaWeeks > 10 / 0.75); // far slower than the fast pace table promises
+  });
+  it('etaWeeks is null when the deficit closes entirely', () => {
+    // Underweight loss downgrades to maintenance — nothing to estimate.
+    const p = buildNutritionPlan({ gender: 'female', birthDate: '1995-01-01', heightCm: 170, weightKg: 50, targetWeightKg: 45, activityLevel: 'sedentary' });
+    assert.equal(p.goal, 'Lose Weight');
+    assert.equal(p.dailyGoalKcal, p.maintenance);
+    assert.equal(p.etaWeeks, null);
   });
 });

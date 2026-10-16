@@ -149,6 +149,28 @@ async function registerFailedLogin(user) {
   await user.save();
 }
 
+// Marks a pre-existing unverified row as verified IN PLACE. The tokenVersion
+// bump is the security half: anyone who obtained a token while this row was
+// unverified (skip-verification, an interrupted register flow) must lose
+// access the moment the mailbox is actually proven. The caller saves.
+function markVerified(user) {
+  user.emailVerified = true;
+  user.tokenVersion = (user.tokenVersion || 0) + 1;
+  user.clearVerifyCode();
+}
+
+// Email-failure path for POST /register: the pending row (which already
+// holds a fresh code hash from issuePendingCode) is left untouched so
+// resend-code / skip-verification / verify-email keep working. Never creates
+// an unverified User row here — that orphaned the account with no usable
+// code and deleted the only path to one. Deps-injectable for tests (same
+// pattern as seedTrackingFromOnboarding).
+async function keepPendingOnEmailFailure(deps, email) {
+  const Pending = (deps && deps.PendingRegistration) || PendingRegistration;
+  const pending = await Pending.findOne({ email });
+  return { requiresVerification: true, emailSent: false, pendingKept: !!pending };
+}
+
 // POST /api/auth/register — creates a PENDING registration, not a user.
 // The User row is created only after verify-email (or skip-verification).
 router.post('/register', async (req, res) => {
@@ -170,6 +192,8 @@ router.post('/register', async (req, res) => {
     await PendingRegistration.deleteOne({ email });
     existing.name = name;
     existing.passwordHash = await hashPassword(password);
+    // Credentials changed: any token minted for the old (unverified) row dies.
+    existing.tokenVersion = (existing.tokenVersion || 0) + 1;
     const emailSent = await issueVerifyCode(existing);
     return res.status(201).json({ requiresVerification: true, emailSent });
   }
@@ -181,17 +205,10 @@ router.post('/register', async (req, res) => {
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
   const emailSent = await issuePendingCode(pending);
-  // If email failed to send, still create the User row as unverified so the
-  // user can complete onboarding. They'll need to verify later or use
-  // "skip-verification" on next login.
+  // Email down: the pending (with its fresh code hash) stays, so the user
+  // can resend from the verify screen or skip once a code actually arrives.
   if (!emailSent) {
-    await User.create({ name, email, passwordHash, emailVerified: false });
-    await PendingRegistration.deleteOne({ email });
-    return res.status(201).json({ 
-      requiresVerification: true, 
-      emailSent: false,
-      skipVerification: true 
-    });
+    return res.status(201).json(await keepPendingOnEmailFailure({}, email));
   }
   res.status(201).json({ requiresVerification: true, emailSent });
 });
@@ -246,8 +263,17 @@ router.post('/verify-email', async (req, res) => {
   if (pending) {
     const state = await checkCode(pending, 'code', code);
     if (state === 'ok') {
-      const user = await User.create({ name: pending.name, email: pending.email, passwordHash: pending.passwordHash });
-      user.emailVerified = true;
+      let user;
+      try {
+        user = await User.create({ name: pending.name, email: pending.email, passwordHash: pending.passwordHash });
+      } catch (e) {
+        // Double-tap race: a twin request already created+verified the row.
+        if (e && e.code === 11000) {
+          return res.status(409).json({ error: 'email already verified — please log in' });
+        }
+        throw e;
+      }
+      markVerified(user);
       await user.save();
       await PendingRegistration.deleteOne({ _id: pending._id });
       return res.json({ token: signToken(user), user });
@@ -262,8 +288,7 @@ router.post('/verify-email', async (req, res) => {
   if (user && !user.emailVerified) {
     const state = await checkCode(user, 'verifyCode', code);
     if (state === 'ok') {
-      user.emailVerified = true;
-      user.clearVerifyCode();
+      markVerified(user);
       await user.save();
       return res.json({ token: signToken(user), user });
     }
@@ -457,6 +482,8 @@ module.exports = router;
 module.exports.profileSchema = profileSchema;
 module.exports.skipSchema = skipSchema;
 module.exports.checkCode = checkCode;
+module.exports.keepPendingOnEmailFailure = keepPendingOnEmailFailure;
 module.exports.registerFailedLogin = registerFailedLogin;
+module.exports.markVerified = markVerified;
 module.exports.toLbs = toLbs;
 module.exports.seedTrackingFromOnboarding = seedTrackingFromOnboarding;

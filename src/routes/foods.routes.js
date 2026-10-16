@@ -59,16 +59,24 @@ router.get('/suggestions', async (req, res, next) => {
 });
 
 // GET /api/foods/search?q=chicken&limit=20&category=Proteins — fast prefix + text search over shared catalog
+// q may be omitted when category is given (Browse by category needs no text).
 router.get('/search', async (req, res, next) => {
   const q = (req.query.q || '').trim();
-  if (!q || q.length < 2) return res.status(400).json({ error: 'q query param required (min 2 chars)' });
+  const category = CATEGORIES.find((c) => c.key.toLowerCase() === String(req.query.category || '').toLowerCase());
+  if ((!q || q.length < 2) && !category) {
+    return res.status(400).json({ error: 'q query param required (min 2 chars)' });
+  }
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
   const escaped = escapeRegex(q);
-  const category = CATEGORIES.find((c) => c.key.toLowerCase() === String(req.query.category || '').toLowerCase());
   const categoryFilter = category
     ? { name: new RegExp(category.keywords.map(escapeRegex).join('|'), 'i') }
     : null;
   try {
+    if (!q) {
+      // Category-only browse: plain name order — $text score cannot sort this.
+      const foods = await Food.find(categoryFilter).sort({ name: 1 }).limit(limit).lean();
+      return res.json({ foods, count: foods.length });
+    }
     const baseOr = [{ name: new RegExp(`^${escaped}`, 'i') }, { $text: { $search: q } }];
     const query = categoryFilter ? { $and: [{ $or: baseOr }, categoryFilter] } : { $or: baseOr };
     const foods = await Food.find(query, { score: { $meta: 'textScore' } })
