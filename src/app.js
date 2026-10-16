@@ -38,9 +38,15 @@ const apiLimiter = rateLimit({
 });
 app.use('/api', apiLimiter);
 
+// count only FAILURES: the same CGNAT reasoning above applies double here,
+// because all six credential endpoints share this one per-IP bucket. With
+// successful sign-ins counted, a handful of users on one carrier IP could
+// 429 everyone behind it (a working login is not an attack). Guessing still
+// burns the bucket, so brute-force protection is unchanged.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: Number(process.env.AUTH_LIMIT) || 50,
+  skipSuccessfulRequests: true,
   message: { error: 'Too many attempts, please try again later' },
 });
 // Credential endpoints only: these are the brute-forceable/abusable ones.
