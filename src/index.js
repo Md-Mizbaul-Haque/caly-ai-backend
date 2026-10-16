@@ -16,14 +16,19 @@ async function main() {
     console.error('JWT_SECRET must be set to a random string of at least 32 characters');
     process.exit(1);
   }
-  try {
-    await connectDb();
-    console.log('MongoDB connected db:', require('mongoose').connection.name);
-  } catch (e) {
-    console.error('MongoDB connect failed:', e.message);
-    console.warn('Continuing without DB — /health reports db:down, /api routes return 503');
-  }
   const server = app.listen(PORT, '0.0.0.0', () => console.log(`Caly AI API running on http://localhost:${PORT}`));
+  // DB connects in the BACKGROUND: every /api router answers 503 'database
+  // unavailable' until it lands (/health reports db:down), so a cold boot
+  // serves a fast, retryable failure instead of a hung socket. Awaiting the
+  // connect before listen left cold starts (Render sleep + Atlas TLS) burning
+  // the app's whole timeout budget before the server answered anything.
+  connectDb().then(
+    () => console.log('MongoDB connected db:', require('mongoose').connection.name),
+    (e) => {
+      console.error('MongoDB connect failed:', e.message);
+      console.warn('Running without DB — /health reports db:down, /api routes return 503 until it connects');
+    }
+  );
   // Email self-check (async, never blocks boot): a missing SMTP_HOST means
   // verification codes are console-logged, NOT sent — scream about it here
   // so Render logs show the misconfiguration instead of silent no-delivery.
