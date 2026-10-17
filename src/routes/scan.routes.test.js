@@ -70,6 +70,78 @@ describe('isQuotaError (Groq rate-limit detection)', () => {
 
 const { scanHelpers: scanHelpers2 } = require('./scan.routes');
 
+describe('classifyVisionError (why a paid vision call failed)', () => {
+  const { classifyVisionError } = scanHelpers2;
+
+  it('provider could not decode the photo -> image (blame the file, not the service)', () => {
+    // Groq's real shape for corrupt/truncated bytes, measured live:
+    // { status: 400, message: '400 invalid image data' }
+    assert.equal(classifyVisionError({ status: 400, message: '400 invalid image data' }), 'image');
+    assert.equal(classifyVisionError({ statusCode: 415 }), 'image');
+    assert.equal(classifyVisionError({ status: 422 }), 'image');
+  });
+
+  it('provider rate limit stays quota (never mislabeled)', () => {
+    assert.equal(classifyVisionError({ status: 429, message: 'Rate limit reached' }), 'quota');
+    assert.equal(classifyVisionError(new Error('Request was rejected due to a rate limit (ITPM 7000)')), 'quota');
+  });
+
+  it('outages, timeouts, network faults and unparseable output -> transient', () => {
+    // Measured live: congested Groq runs 14-54s and throws 5xx/429 freely.
+    assert.equal(classifyVisionError({ status: 500 }), 'transient');
+    assert.equal(classifyVisionError({ status: 503 }), 'transient');
+    assert.equal(classifyVisionError(new Error('Request timed out.')), 'transient');
+    assert.equal(classifyVisionError(new Error('model did not return JSON')), 'transient');
+    // Config faults (bad key, retired model) must NOT blame the user's photo.
+    assert.equal(classifyVisionError({ status: 404, message: 'model does not exist' }), 'transient');
+    assert.equal(classifyVisionError({ status: 401, message: 'invalid api key' }), 'transient');
+  });
+});
+
+describe('withTransientRetry (one fresh attempt for blips)', () => {
+  const { withTransientRetry } = scanHelpers2;
+  const noSleep = async () => {};
+  const fail = (status, message) => { const e = new Error(message || `status ${status}`); if (status) e.status = status; return e; };
+
+  it('retries a transient failure once and returns the second result', async () => {
+    let calls = 0;
+    const out = await withTransientRetry(async () => {
+      calls += 1;
+      if (calls === 1) throw fail(500, 'internal server error');
+      return 'recovered';
+    }, { sleep: noSleep });
+    assert.equal(out, 'recovered');
+    assert.equal(calls, 2);
+  });
+
+  it('never retries an unreadable image (the same bytes fail the same way)', async () => {
+    let calls = 0;
+    await assert.rejects(
+      withTransientRetry(async () => { calls += 1; throw fail(400, '400 invalid image data'); }, { sleep: noSleep }),
+      /invalid image data/
+    );
+    assert.equal(calls, 1);
+  });
+
+  it('never retries quota (an ITPM blip would just 429 again)', async () => {
+    let calls = 0;
+    await assert.rejects(
+      withTransientRetry(async () => { calls += 1; throw fail(429, 'Rate limit reached'); }, { sleep: noSleep }),
+      /Rate limit reached/
+    );
+    assert.equal(calls, 1);
+  });
+
+  it('gives up after the attempt budget and rethrows the last error', async () => {
+    let calls = 0;
+    await assert.rejects(
+      withTransientRetry(async () => { calls += 1; throw fail(503, 'overloaded'); }, { sleep: noSleep }),
+      /overloaded/
+    );
+    assert.equal(calls, 2);
+  });
+});
+
 describe('lookupOffProduct (upstream accounting)', () => {
   const { lookupOffProduct } = scanHelpers2;
 

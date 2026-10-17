@@ -7,7 +7,7 @@ const Weight = require('../models/Weight');
 const WeightGoal = require('../models/WeightGoal');
 const { requireAuth } = require('../middleware/auth');
 const { resolveTimezone } = require('../utils/timezone');
-const { sendMail, classifyMailError } = require('../services/mailer');
+const { sendMail, classifyMailError, isMailConfigured } = require('../services/mailer');
 const { verificationEmail, passwordResetEmail } = require('../services/emailTemplates');
 const {
   CODE_TTL_MINUTES,
@@ -61,65 +61,96 @@ function invalid(res, details) {
   return res.status(400).json({ error: 'invalid request', details });
 }
 
-// Fire-and-forget mail: the code hash is already persisted, so the request
-// must not await SMTP (Render->Gmail black-holes 10-30s, blowing the client's
-// 15-30s timeout). Returns true optimistically; failures land in /health via
-// lastMailError and the user can resend. shortcut: emailSent is optimistic,
-// upgrade to awaited send with 4s race if false-negatives matter.
-function sendInBackground(promise, email) {
-  promise.catch((e) => {
-    console.warn(`[auth] email send failed to=${email} class=${classifyMailError(e)} code=${e.code || '-'}: ${e.message}`);
-  });
+// Sends one mail and reports whether it ACTUALLY went out. The code hash is
+// already persisted, so a slow provider must not blow the client's 15-30 s
+// timeout — but we still wait up to MAIL_BUDGET_MS for a verdict, because
+// replying "check your email" to a send that already failed is how a dead
+// relay goes unnoticed for months (exactly what a host-blocked SMTP port
+// looks like from the app). A send still in flight when the budget expires
+// counts as sent: any failure lands in /health via lastMailError.
+const MAIL_BUDGET_MS = Math.max(parseInt(process.env.MAIL_BUDGET_MS, 10) || 6000, 0);
+
+async function sendWithinBudget(message) {
+  let timer = null;
+  try {
+    await Promise.race([
+      sendMail(message),
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const err = new Error(`mail budget of ${MAIL_BUDGET_MS} ms exceeded`);
+          err.code = 'EBUDGET';
+          reject(err);
+        }, MAIL_BUDGET_MS);
+      }),
+    ]);
+    return true;
+  } catch (e) {
+    // Still in flight — assume it lands rather than failing the request.
+    if (e && e.code === 'EBUDGET') return true;
+    console.warn(`[auth] email send failed to=${message.to} class=${classifyMailError(e)} code=${e.code || '-'}: ${e.message}`);
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
-// Saves the code, then queues email in background. Returns true immediately;
-// a down SMTP must never fail (or hang past mailer timeouts) the request.
+// Saves the code, then sends it. Returns the real outcome so the caller can
+// tell the app when the email did not go out.
+//
+// Per-account send throttle: a second code email never leaves within 60 s of
+// the previous one — the first code stays valid for CODE_TTL_MINUTES, so a
+// rapid repeat just reuses it. Without this, every resend-code / register /
+// forgot-password call mailed the box again for free: the auth limiter counts
+// only failures, and a resend/forgot always succeeds.
+const CODE_RESEND_WAIT_MS = 60 * 1000;
+
+function withinThrottle(doc) {
+  const t = doc.lastCodeIssuedAt;
+  return !!t && Date.now() - t.getTime() < CODE_RESEND_WAIT_MS;
+}
+
+// Curtailing email floods beats a swallowed logpoint retry: a send that FAILED
+// also consumes the wait — the next resend attempt is 60 s away, never instant.
 async function issueVerifyCode(user) {
+  if (withinThrottle(user)) return true;
   const code = generateCode();
   user.verifyCodeHash = hashCode(code);
   user.verifyCodeExpiresAt = codeExpiry();
   user.verifyCodeAttempts = 0;
+  user.lastCodeIssuedAt = new Date();
   await user.save();
-  sendInBackground(
-    sendMail({
-      to: user.email,
-      ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
-    }),
-    user.email
-  );
-  return true;
+  return sendWithinBudget({
+    to: user.email,
+    ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
+  });
 }
 
 async function issuePendingCode(pending) {
+  if (withinThrottle(pending)) return true;
   const code = generateCode();
   pending.codeHash = hashCode(code);
   pending.codeExpiresAt = codeExpiry();
   pending.codeAttempts = 0;
+  pending.lastCodeIssuedAt = new Date();
   await pending.save();
-  sendInBackground(
-    sendMail({
-      to: pending.email,
-      ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
-    }),
-    pending.email
-  );
-  return true;
+  return sendWithinBudget({
+    to: pending.email,
+    ...verificationEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
+  });
 }
 
 async function issueResetCode(user) {
+  if (withinThrottle(user)) return true;
   const code = generateCode();
   user.resetCodeHash = hashCode(code);
   user.resetCodeExpiresAt = codeExpiry();
   user.resetCodeAttempts = 0;
+  user.lastCodeIssuedAt = new Date();
   await user.save();
-  sendInBackground(
-    sendMail({
-      to: user.email,
-      ...passwordResetEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
-    }),
-    user.email
-  );
-  return true;
+  return sendWithinBudget({
+    to: user.email,
+    ...passwordResetEmail({ code, ttlMinutes: CODE_TTL_MINUTES }),
+  });
 }
 
 // Checks a 6-digit code against a doc whose code fields are named
@@ -164,14 +195,15 @@ function markVerified(user) {
   user.clearVerifyCode();
 }
 
-// No-SMTP mode: the relay is removed (SMTP_HOST unset), so mailbox ownership
-// cannot be proven by code. Accounts verify automatically instead of hanging
-// on an undeliverable send. TEMPORARY — the moment SMTP_HOST is set again
-// every branch below goes dormant and code verification resumes.
+// No-transport mode: neither the SMTP relay nor the HTTPS mail API is
+// configured, so mailbox ownership cannot be proven by code. Accounts verify
+// automatically instead of hanging on an undeliverable send. TEMPORARY — the
+// moment either transport is configured every branch below goes dormant and
+// code verification resumes.
 // shortcut: zero email-ownership proof in this mode; do not collect sensitive
-// data or rely on reset-by-email until SMTP returns.
-function isSmtpConfigured() {
-  return !!process.env.SMTP_HOST;
+// data or rely on reset-by-email until a transport returns.
+function isEmailDeliveryConfigured() {
+  return isMailConfigured();
 }
 
 // The verify-email success path minus the code check: creates the verified
@@ -221,7 +253,7 @@ router.post('/register', async (req, res) => {
     existing.name = name;
     // Credentials re-confirmed: any token minted for the old (unverified) row dies.
     existing.tokenVersion = (existing.tokenVersion || 0) + 1;
-    if (!isSmtpConfigured()) {
+    if (!isEmailDeliveryConfigured()) {
       markVerified(existing);
       await existing.save();
       return res.status(201).json({ token: signToken(existing), user: existing, autoVerified: true });
@@ -237,12 +269,12 @@ router.post('/register', async (req, res) => {
     // the stranger's password opens the account). Only a matching password
     // proves it is the same person retrying.
     if (!(await passwordMatches(password, pending.passwordHash))) {
-      return res.status(409).json({ error: isSmtpConfigured()
+      return res.status(409).json({ error: isEmailDeliveryConfigured()
         ? 'a verification is already in progress for this email — enter the code from your inbox'
         : 'an account with this email already exists — sign in with your password' });
     }
     pending.name = name;
-    if (!isSmtpConfigured()) {
+    if (!isEmailDeliveryConfigured()) {
       try {
         const user = await materializeVerifiedUser(pending);
         return res.status(201).json({ token: signToken(user), user, autoVerified: true });
@@ -266,7 +298,7 @@ router.post('/register', async (req, res) => {
     { $setOnInsert: { name, email, passwordHash } },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
-  if (!isSmtpConfigured()) {
+  if (!isEmailDeliveryConfigured()) {
     try {
       const user = await materializeVerifiedUser(created);
       return res.status(201).json({ token: signToken(user), user, autoVerified: true });
@@ -299,7 +331,7 @@ router.post('/login', async (req, res) => {
     // email on wrong password — no enumeration.
     const pending = await PendingRegistration.findOne({ email });
     if (pending && (await passwordMatches(password, pending.passwordHash))) {
-      if (!isSmtpConfigured()) {
+      if (!isEmailDeliveryConfigured()) {
         try {
           const autoUser = await materializeVerifiedUser(pending);
           return res.json({ token: signToken(autoUser), user: autoUser, autoVerified: true });
@@ -327,7 +359,7 @@ router.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'invalid email or password' });
   }
   if (!user.emailVerified) {
-    if (!isSmtpConfigured()) {
+    if (!isEmailDeliveryConfigured()) {
       markVerified(user);
       if (user.failedLoginAttempts || user.loginLockedUntil) {
         user.failedLoginAttempts = 0;
@@ -358,7 +390,7 @@ router.post('/verify-email', async (req, res) => {
 
   // No-SMTP mode: the code cannot be delivered, so checking it would lock
   // everyone out. Any well-formed code completes verification.
-  if (!isSmtpConfigured()) {
+  if (!isEmailDeliveryConfigured()) {
     const pendingAuto = await PendingRegistration.findOne({ email });
     if (pendingAuto) {
       try {
@@ -428,7 +460,7 @@ router.post('/resend-code', async (req, res) => {
   const { email } = parsed.data;
   // No-SMTP mode: nobody is waiting on a code — verify on the spot and hand
   // back a session so "I didn't get a code" signs the user straight in.
-  if (!isSmtpConfigured()) {
+  if (!isEmailDeliveryConfigured()) {
     const pendingAuto = await PendingRegistration.findOne({ email });
     if (pendingAuto) {
       try {
@@ -483,7 +515,7 @@ router.post('/forgot-password', async (req, res) => {
   const user = await User.findOne({ email: parsed.data.email });
   // No-SMTP mode: no code can be delivered, so report honestly instead of
   // minting an undeliverable code. Reset-by-email returns with SMTP.
-  const emailSent = !isSmtpConfigured() ? false : user ? await issueResetCode(user) : true;
+  const emailSent = !isEmailDeliveryConfigured() ? false : user ? await issueResetCode(user) : true;
   res.json({ ok: true, emailSent });
 });
 
@@ -655,6 +687,12 @@ module.exports.checkCode = checkCode;
 module.exports.keepPendingOnEmailFailure = keepPendingOnEmailFailure;
 module.exports.registerFailedLogin = registerFailedLogin;
 module.exports.markVerified = markVerified;
-module.exports.isSmtpConfigured = isSmtpConfigured;
+module.exports.isEmailDeliveryConfigured = isEmailDeliveryConfigured;
+module.exports.sendWithinBudget = sendWithinBudget;
 module.exports.toLbs = toLbs;
 module.exports.seedTrackingFromOnboarding = seedTrackingFromOnboarding;
+module.exports.issueVerifyCode = issueVerifyCode;
+module.exports.issuePendingCode = issuePendingCode;
+module.exports.issueResetCode = issueResetCode;
+module.exports.withinThrottle = withinThrottle;
+module.exports.CODE_RESEND_WAIT_MS = CODE_RESEND_WAIT_MS;

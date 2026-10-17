@@ -33,17 +33,25 @@ async function main() {
   // verification codes are console-logged, NOT sent — scream about it here
   // so Render logs show the misconfiguration instead of silent no-delivery.
   // Otherwise verify the relay credentials before the first user registers.
-  const { getTransporter, classifyMailError, validateSmtpConfig } = require('./services/mailer');
+  // The branch key is isMailConfigured(), not SMTP_HOST: an HTTP mail key
+  // without SMTP_HOST IS a working transport, and printing "auto-verify
+  // mode" beneath it reports a misconfiguration that only costs launch time.
+  const { getTransporter, classifyMailError, isMailConfigured, validateSmtpConfig } = require('./services/mailer');
   for (const problem of validateSmtpConfig()) {
     console.error(`SMTP config: ${problem}`);
   }
-  if (!process.env.SMTP_HOST) {
-    console.log('SMTP_HOST not set — running in no-SMTP auto-verify mode: accounts verify without email codes. Set SMTP_HOST/PORT/USER/PASS on the host to restore code verification.');
-  } else {
+  if (!isMailConfigured()) {
+    console.log('No mail transport (SMTP_HOST unset) — auto-verify mode: accounts verify without email codes.');
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[boot] PRODUCTION has no mail transport — mailbox ownership is NOT proven. Set SMTP_HOST/PORT/USER/PASS (raw SMTP via nodemailer) or BREVO_API_KEY on the host before launch.');
+    }
+  } else if (process.env.SMTP_HOST) {
     getTransporter().verify().then(
       () => console.log('SMTP relay verified — verification emails can send'),
       (e) => console.error(`SMTP relay verify failed class=${classifyMailError(e)} code=${e.code || '-'}: ${e.message}`)
     );
+  } else {
+    console.log('HTTP mail API configured — verification codes send over HTTPS.');
   }
   function shutdown(signal) {
     console.log(`${signal} received — shutting down`);

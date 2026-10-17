@@ -18,6 +18,8 @@ const pendingSchema = new mongoose.Schema(
     codeHash: { type: String, default: null },
     codeExpiresAt: { type: Date, default: null },
     codeAttempts: { type: Number, default: 0 },
+    // Issue time of the last verification code — backs the 60 s send throttle.
+    lastCodeIssuedAt: { type: Date, default: null },
     expiresAt: {
       type: Date,
       default: () => new Date(Date.now() + 24 * 3600 * 1000),

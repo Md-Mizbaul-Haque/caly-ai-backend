@@ -33,6 +33,9 @@ const userSchema = new mongoose.Schema(
     resetCodeHash: { type: String, default: null },
     resetCodeExpiresAt: { type: Date, default: null },
     resetCodeAttempts: { type: Number, default: 0 },
+    // Issue time of the last verify/reset code — backs the 60 s per-account
+    // email throttle (auth.routes withinThrottle). Never leaves the JSON.
+    lastCodeIssuedAt: { type: Date, default: null },
     // Per-account login throttle (the IP limiter alone is easy to rotate around).
     failedLoginAttempts: { type: Number, default: 0 },
     loginLockedUntil: { type: Date, default: null },
@@ -58,6 +61,7 @@ userSchema.set('toJSON', {
     delete ret.resetCodeHash;
     delete ret.resetCodeExpiresAt;
     delete ret.resetCodeAttempts;
+    delete ret.lastCodeIssuedAt;
     delete ret.failedLoginAttempts;
     delete ret.loginLockedUntil;
     delete ret.tokenVersion;

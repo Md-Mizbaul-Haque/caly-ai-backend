@@ -11,6 +11,15 @@ const router = express.Router();
 // account drain the shared provider quota; this is the cost guard.
 const SCAN_DAILY_LIMIT = Math.max(parseInt(process.env.SCAN_DAILY_LIMIT, 10) || 50, 1);
 
+// Vision-call attempts: one automatic retry for provider blips. Two 25 s
+// attempts + a 500 ms gap = 50.5 s, safely under the app's 60 s read
+// budget, so a slow provider surfaces as OUR dialog instead of a client
+// abort. Measured while diagnosing a user 502: congested Groq ran 14-54 s
+// per call and a fresh second attempt often landed where the first stalled.
+const VISION_ATTEMPTS = 2;
+const VISION_ATTEMPT_TIMEOUT_MS = 25000;
+const VISION_RETRY_GAP_MS = 500;
+
 // Charges one scan against today's (UTC) quota and returns the new count.
 // Read-modify-write is deliberate: a rare parallel-scan race may undercount
 // by a request or two — fine for a cost guard, never a security boundary.
@@ -141,6 +150,39 @@ function isQuotaError(e) {
     || msg.includes('requests per day');
 }
 
+// Vision-call failure taxonomy — every provider fault used to funnel into
+// one generic 502 with no retry; these three kinds deserve different answers:
+//   image     - Groq rejected the bytes ("400 invalid image data"); the same
+//               file always fails, so blame the file and never retry.
+//   quota     - provider rate limit; the 429 branch owns it.
+//   transient - 5xx, timeouts, network faults, unparseable output; one
+//               fresh attempt may fix it.
+function classifyVisionError(e) {
+  if (isQuotaError(e)) return 'quota';
+  const status = Number(e?.status ?? e?.statusCode);
+  if (status === 400 || status === 413 || status === 415 || status === 422) return 'image';
+  return 'transient';
+}
+
+// Runs fn() and retries ONLY transient failures — an unreadable photo or an
+// exhausted rate limit throws through on the first attempt, because the same
+// bytes / the same window would only fail (and bill) again.
+async function withTransientRetry(fn, { attempts = VISION_ATTEMPTS, sleep } = {}) {
+  const nap = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (e) {
+      lastErr = e;
+      if (classifyVisionError(e) !== 'transient' || attempt === attempts) throw e;
+      console.warn(`[scan] vision attempt ${attempt}/${attempts} failed: ${String(e.message || e).slice(0, 200)}`);
+      await nap(VISION_RETRY_GAP_MS);
+    }
+  }
+  throw lastErr;
+}
+
 // Magic numbers, not client mimetypes: a spoofed Content-Type must not reach
 // the paid vision call (or Cloudinary). Covers JPEG/PNG/GIF/WebP.
 function isImageBuffer(buf) {
@@ -198,22 +240,31 @@ router.post('/', upload.single('image'), async (req, res) => {
   }
   try {
     const b64 = req.file.buffer.toString('base64');
-    const completion = await aiClient.chat.completions.create({
-      model,
-      max_tokens: 500,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: FOOD_SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'What food is in this image? Estimate nutrition per serving.' },
-            { type: 'image_url', image_url: { url: `data:${req.file.mimetype};base64,${b64}` } },
-          ],
-        },
-      ],
-    });
-    const parsed = LABEL_SCHEMA.safeParse(parseJsonLoose(completion.choices[0]?.message?.content));
+    const content = await withTransientRetry(() =>
+      aiClient.chat.completions
+        .create(
+          {
+            model,
+            max_tokens: 500,
+            response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: FOOD_SYSTEM_PROMPT },
+              {
+                role: 'user',
+                content: [
+                  { type: 'text', text: 'What food is in this image? Estimate nutrition per serving.' },
+                  { type: 'image_url', image_url: { url: `data:${req.file.mimetype};base64,${b64}` } },
+                ],
+              },
+            ],
+          },
+          // Per-attempt cap (25 s): two attempts + gap stay inside the app's
+          // 60 s budget so WE answer the phone, never a mid-flight abort.
+          { timeout: VISION_ATTEMPT_TIMEOUT_MS }
+        )
+        .then((completion) => parseJsonLoose(completion.choices[0]?.message?.content))
+    );
+    const parsed = LABEL_SCHEMA.safeParse(content);
     if (!parsed.success || !parsed.data.items.length) {
       return res.status(422).json({ error: 'no food detected in this photo' });
     }
@@ -222,12 +273,24 @@ router.post('/', upload.single('image'), async (req, res) => {
     // Our failure, not theirs: give the quota back (a 422 "no food" keeps
     // the charge — the paid vision call did run).
     await refundScanQuota(req.user.id).catch(() => {});
-    if (isQuotaError(e)) {
+    const kind = classifyVisionError(e);
+    if (kind === 'quota') {
       console.warn(`[scan ${req.reqId || '-'}] quota exhausted: ${e.message}`);
       return res.status(429).json({ error: 'daily scan limit reached — please try again tomorrow' });
     }
-    console.error('scan error:', e.message);
-    res.status(502).json({ error: 'failed to analyze image' });
+    if (kind === 'image') {
+      // The provider refused these bytes — the same file can never scan, so
+      // say that plainly instead of implying a service outage. A 4xx here is
+      // NOT retryable; the app shows it as a plain message (422 is reserved
+      // for "no food in frame" and would wrongly open an empty result sheet).
+      console.warn(`[scan ${req.reqId || '-'}] unreadable image: ${String(e.message || e).slice(0, 200)}`);
+      return res.status(400).json({ error: "We couldn't read this photo. Retake it or pick a different one." });
+    }
+    // Transient after one retry: keep the provider detail in the server log
+    // (truncated, never a key) and answer a retryable 502 — the app's
+    // HTTP_5xx code now paints a Retry button for it.
+    console.error(`[scan ${req.reqId || '-'}] vision failed: ${e.status || e.statusCode || e.name || 'no-status'} ${String(e.message || e).slice(0, 300)}`);
+    res.status(502).json({ error: 'image analysis failed — please try again' });
   }
 });
 
@@ -356,4 +419,4 @@ module.exports.LABEL_SCHEMA = LABEL_SCHEMA;
 module.exports.SCAN_DAILY_LIMIT = SCAN_DAILY_LIMIT;
 module.exports.chargeScanQuota = chargeScanQuota;
 module.exports.refundScanQuota = refundScanQuota;
-module.exports.scanHelpers = { toNum, servingGrams, isImageBuffer, isQuotaError, lookupOffProduct };
+module.exports.scanHelpers = { toNum, servingGrams, isImageBuffer, isQuotaError, lookupOffProduct, classifyVisionError, withTransientRetry };
