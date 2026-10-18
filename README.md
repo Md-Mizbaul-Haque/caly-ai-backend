@@ -46,7 +46,7 @@ npm test               # node --test route validation suite
 | `GROQ_API_KEY` | one of the two | `gsk_...` — preferred vision provider (free tier, fast) |
 | `OPENAI_API_KEY` | one of the two | `sk-...` fallback vision provider |
 | `VISION_MODEL` | no | Defaults to `qwen/qwen3.8-27b` (Groq) or `gpt-4o-mini` (OpenAI) |
-| `SMTP_HOST/PORT/SECURE/USER/PASS/FROM` | no | Without `SMTP_HOST`, verification codes are logged to console instead of emailed |
+| `SMTP_HOST/PORT/SECURE/USER/PASS/FROM` | no | Without `SMTP_HOST`, verification codes are logged to console instead of emailed. On Render free (blocks outbound 25/465/587) use a relay on an allowed port, e.g. Resend `smtp.resend.com:2587` (user `resend`, pass = `re_...` API key) |
 | `CORS_ORIGINS` | no | Comma-separated allowed origins (empty = allow all) |
 | `TRUST_PROXY` | no | Set `1` behind a proxy |
 | `API_LIMIT` / `AUTH_LIMIT` | no | Rate limits per 15 min (`100` / `20`) |
@@ -86,12 +86,12 @@ Service-level tests (e.g. `src/services/nutritionPlan.test.js`) are not covered 
 | `/health` shows `db:down`, `/api/*` returns `503` | `MONGO_URI` missing or unreachable. Check Atlas IP allowlist / local `mongod`. |
 | `POST /api/scan` returns `503` | No vision key set. Add `GROQ_API_KEY` (or `OPENAI_API_KEY`) and restart. |
 | Auth returns `403 {needsVerification:true}` | Email not verified. Call `POST /api/auth/verify-email` or `resend-code`. |
-| No emails arrive | `SMTP_HOST` unset — codes are logged to the server console by design. Set SMTP vars for real delivery. |
+| No emails arrive | `SMTP_HOST` unset (codes are console-logged by design), **or** the host blocks outbound SMTP ports. Render free blocks 25/465/587 — use a relay on 2525/2587 (e.g. Resend `smtp.resend.com:2587`). Check `GET /health` → `smtp.lastError.class` |
 | `429 Too many requests` | Hit `API_LIMIT` / `AUTH_LIMIT`. Raise the limits in `.env` or wait 15 min. |
 
 ## Deployment
 
-1. Set `NODE_ENV=production`, `PORT`, `MONGO_URI`, `JWT_SECRET`, one vision key, SMTP, and `CORS_ORIGINS` (your frontend origin).
+1. Set `NODE_ENV=production`, `PORT`, `MONGO_URI`, `JWT_SECRET`, one vision key, SMTP, and `CORS_ORIGINS` (your frontend origin). On Render free, SMTP vars must point at a relay on a non-blocked port (e.g. Resend `smtp.resend.com:2587`), not `smtp.gmail.com:587`.
 2. Set `TRUST_PROXY=1` if behind a reverse proxy / load balancer.
 3. Run `npm install --omit=dev` then `npm start`.
 4. Keep `/health` as the load-balancer / uptime check.
